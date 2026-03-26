@@ -418,7 +418,8 @@ class FloatingTranslateService : Service() {
     }
 
     private fun onSentence(en: String) {
-        translationPipeline.submitSentence(floatingParagraphId, en)
+        val seqId = translationPipeline.allocateSeqId()
+        translationPipeline.submitSentence(seqId, floatingParagraphId, en)
     }
 
     // ===================== TTS =====================

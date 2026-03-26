@@ -39,15 +39,15 @@ class TranslationPipeline(private val scope: CoroutineScope) {
     fun setEngine(eng: TranslationEngine?) { engine = eng }
     fun setRefiner(ref: TranslationRefiner?) { refiner = ref }
 
+    /** Allocate a seqId so caller can update UI state before translation starts. */
+    fun allocateSeqId(): Int = seqCounter.getAndIncrement()
+
     /**
-     * Submit a sentence. Returns seqId.
-     * Translation runs immediately in a coroutine — no queue, no semaphore.
-     * As soon as translation is done: UI update + TTS, zero delay.
+     * Start translating a sentence with a pre-allocated seqId.
+     * Caller MUST have already updated UI state with this seqId.
      */
-    fun submitSentence(paragraphId: Int, en: String): Int {
-        val seqId = seqCounter.getAndIncrement()
+    fun submitSentence(seqId: Int, paragraphId: Int, en: String) {
         pendingCount.incrementAndGet()
-        callback?.onTranslationStarted(seqId, en)
 
         scope.launch(Dispatchers.IO) {
             try {
@@ -79,7 +79,6 @@ class TranslationPipeline(private val scope: CoroutineScope) {
                 pendingCount.decrementAndGet()
             }
         }
-        return seqId
     }
 
     /**

@@ -1020,7 +1020,7 @@ class MainActivity : ComponentActivity() {
     private fun addSegmentToParagraph(text: String) {
         _currentPartial = ""
 
-        // Ensure current paragraph exists (start new one if previous is already refined or full)
+        // Ensure current paragraph exists
         if (_paragraphs.isEmpty() || _paragraphs.last().let {
                 it.refinedZh.isNotBlank() || (!it.anyTranslating && it.allDone && it.segments.size >= 8)
             }) {
@@ -1031,15 +1031,20 @@ class MainActivity : ComponentActivity() {
         val para = _paragraphs[paraIdx]
         val paraId = para.id
 
-        // Submit for translation — get seqId first so Segment can track it
-        val seqId = translationPipeline.submitSentence(paraId, text)
+        // 1. Allocate seqId
+        val seqId = translationPipeline.allocateSeqId()
+
+        // 2. Update UI state FIRST — English text visible immediately
         val newSeg = Segment(seqId = seqId, en = text, translating = true)
         _paragraphs[paraIdx] = para.copy(segments = para.segments + newSeg)
+
+        // 3. THEN start translation (callback will find the segment)
+        translationPipeline.submitSentence(seqId, paraId, text)
 
         // History
         translationHistory.append(text, "")
 
-        // Reset paragraph gap timer — use paragraph ID (stable) not index (can shift)
+        // Paragraph gap timer
         paragraphGapJob?.cancel()
         paragraphGapJob = lifecycleScope.launch {
             delay(PARAGRAPH_GAP_MS)
