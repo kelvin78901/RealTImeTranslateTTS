@@ -104,7 +104,6 @@ class MainActivity : ComponentActivity() {
     private var _nextParagraphId = 0
     private var _currentPartial by mutableStateOf("")
     private var _recording by mutableStateOf(false)
-    private var _stopping by mutableStateOf(false)
     private var _micHeardVoice by mutableStateOf(false)
 
     // ---- 设置 ----
@@ -674,7 +673,6 @@ class MainActivity : ComponentActivity() {
             log("媒体捕获中，请先停止媒体捕获再使用麦克风")
             return
         }
-        if (_stopping) return   // Already stopping, ignore taps
         if (_recording) stopAllAsr() else startAsr()
     }
 
@@ -694,50 +692,26 @@ class MainActivity : ComponentActivity() {
     private fun stopAllAsr() {
         if (!_recording) return
         _recording = false
-        _stopping = true
         paragraphGapJob?.cancel()
-        _currentPartial = "处理中…"
-        log("停止录音，处理剩余音频…")
+        log("停止录音")
 
-        // Capture paragraph ID before any async work
         val lastParaId = _paragraphs.lastOrNull()?.id
 
-        // Graceful stop: let ASR flush remaining buffered audio
-        val flushJob: Job? = when (_asrEngine) {
-            0 -> { stopSystemAsr(); null }
-            1 -> { stopVosk(); flushVosk(); null }
+        // Stop ASR — graceful flush for remaining buffered audio
+        when (_asrEngine) {
+            0 -> stopSystemAsr()
+            1 -> { stopVosk(); flushVosk() }
             2, 3, 5 -> whisperAsr?.stopGracefully()
             4 -> sherpaWhisperAsr.stopGracefully()
-            else -> null
         }
 
-        lifecycleScope.launch {
-            try {
-                // Wait for ASR flush (remaining audio processed)
-                flushJob?.let {
-                    withTimeoutOrNull(5000) { it.join() } ?: run {
-                        log("ASR刷新超时，强制停止")
-                        when (_asrEngine) { 2, 3, 5 -> whisperAsr?.stop(); 4 -> sherpaWhisperAsr.stop() }
-                    }
-                }
-
-                // Wait for pending translations (max 8s)
-                val deadline = System.currentTimeMillis() + 8000
-                while (translationPipeline.pendingTranslations > 0 && System.currentTimeMillis() < deadline) {
-                    delay(100)
-                }
-
-                // Close current paragraph → trigger refinement
-                if (lastParaId != null) {
-                    closeParagraphById(lastParaId)
-                }
-            } finally {
-                _stopping = false
-                _currentPartial = ""
-                stopDeviceMetrics()
-                log("所有处理已完成")
-            }
+        // Trigger paragraph refinement in background (non-blocking)
+        if (lastParaId != null) {
+            closeParagraphById(lastParaId)
         }
+
+        _currentPartial = ""
+        stopDeviceMetrics()
     }
 
     private fun flushVosk() {
@@ -1020,7 +994,6 @@ class MainActivity : ComponentActivity() {
      * No re-segmentation.  Paragraph breaks are detected by silence gaps.
      */
     private fun onAsrResult(text: String) {
-        if (_stopping) return   // Don't accept new ASR results while stopping
         paragraphGapJob?.cancel()
 
         // TTS echo suppression
@@ -1196,9 +1169,8 @@ class MainActivity : ComponentActivity() {
             ttsQueue.trySend(zh)
         }
 
-        override fun onLatencyMeasured(translationMs: Long, refinementMs: Long) {
+        override fun onLatencyMeasured(translationMs: Long) {
             _transLatencyMs = translationMs
-            _refineLatencyMs = refinementMs
         }
 
         override fun onParagraphRefined(paragraphId: Int, refinedZh: String) {
@@ -2581,7 +2553,7 @@ class MainActivity : ComponentActivity() {
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
             items(_paragraphs.size) { ParagraphCard(_paragraphs[it]) }
-            if (_currentPartial.isNotBlank() && (_recording || _mediaCaptureActive || _stopping)) {
+            if (_currentPartial.isNotBlank() && (_recording || _mediaCaptureActive)) {
                 item { PartialCard(_currentPartial) }
             }
             if (_paragraphs.isEmpty() && _currentPartial.isBlank()) item { EmptyHint() }
@@ -2684,7 +2656,6 @@ class MainActivity : ComponentActivity() {
         val p by rememberInfiniteTransition().animateFloat(1f, if (recording || isMediaCapture) 1.08f else 1f, infiniteRepeatable(tween(800), RepeatMode.Reverse))
         val label = when {
             isMediaCapture -> "媒体捕获中"
-            _stopping -> "处理中…"
             recording -> "正在录音…点击停止"
             else -> "点击开始录音"
         }

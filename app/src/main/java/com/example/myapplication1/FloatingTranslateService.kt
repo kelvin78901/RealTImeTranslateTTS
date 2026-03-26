@@ -411,7 +411,7 @@ class FloatingTranslateService : Service() {
             ttsPendingCount.incrementAndGet()
             ttsQueue.trySend(zh)
         }
-        override fun onLatencyMeasured(translationMs: Long, refinementMs: Long) {}
+        override fun onLatencyMeasured(translationMs: Long) {}
         override fun onParagraphRefined(paragraphId: Int, refinedZh: String) {
             updateTranslation("→ $refinedZh")
         }
