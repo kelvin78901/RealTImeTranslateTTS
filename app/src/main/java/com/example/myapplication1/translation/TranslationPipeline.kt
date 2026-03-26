@@ -9,17 +9,10 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Two-stage translation pipeline with paragraph-level refinement.
  *
- * **Stage 1 – Per-sentence translation** (low latency):
- *   Each sentence is translated independently and delivered to TTS in strict order.
- *   This gives the user immediate audio feedback.
+ * Stage 1: Per-sentence translation → immediate TTS + UI update.
+ * Stage 2: Paragraph refinement (lazy) → display-only polish, no re-TTS.
  *
- * **Stage 2 – Paragraph refinement** (quality):
- *   When a paragraph is "closed" (all sentences translated), the refiner is called
- *   with all (EN, rawZH) pairs to produce a single polished Chinese paragraph.
- *   This updates the display but does NOT re-trigger TTS (audio was already played
- *   from Stage 1).
- *
- * Ordered delivery: every sentence is delivered to TTS in submission sequence.
+ * All callbacks are dispatched on the scope's dispatcher (Main thread).
  */
 class TranslationPipeline(
     private val scope: CoroutineScope,
@@ -38,20 +31,20 @@ class TranslationPipeline(
         fun onParagraphRefined(paragraphId: Int, refinedZh: String)
     }
 
-    // ---- Per-sentence tracking ----
+    // Per-sentence ordered delivery
     private val sequenceCounter = AtomicInteger(0)
     private val pendingCount = AtomicInteger(0)
     private val resultBuffer = mutableMapOf<Int, String?>()
     private val bufferMutex = Mutex()
-    private var nextDeliverSeqId = 0
+    @Volatile private var nextDeliverSeqId = 0
     private val translationSemaphore = kotlinx.coroutines.sync.Semaphore(maxConcurrentTranslations)
 
-    // ---- Paragraph tracking ----
+    // Paragraph tracking
     data class SentenceRecord(val seqId: Int, val en: String, var zh: String = "", var done: Boolean = false)
     private val paragraphSentences = mutableMapOf<Int, MutableList<SentenceRecord>>()
     private val paragraphMutex = Mutex()
 
-    private var callback: Callback? = null
+    @Volatile private var callback: Callback? = null
     private var engine: TranslationEngine? = null
     private var refiner: TranslationRefiner? = null
 
@@ -61,19 +54,19 @@ class TranslationPipeline(
     fun setEngine(eng: TranslationEngine?) { engine = eng }
     fun setRefiner(ref: TranslationRefiner?) { refiner = ref }
 
-    // ===================== Stage 1: per-sentence translation =====================
+    // ===================== Stage 1 =====================
 
     fun submitSentence(paragraphId: Int, en: String): Int {
         val seqId = sequenceCounter.getAndIncrement()
         pendingCount.incrementAndGet()
+
+        // Register paragraph record synchronously (called from Main)
+        val list = paragraphSentences.getOrPut(paragraphId) { mutableListOf() }
+        list.add(SentenceRecord(seqId, en))
+
         callback?.onTranslationStarted(seqId, en)
 
         scope.launch {
-            paragraphMutex.withLock {
-                paragraphSentences.getOrPut(paragraphId) { mutableListOf() }
-                    .add(SentenceRecord(seqId, en))
-            }
-
             bufferMutex.withLock { resultBuffer[seqId] = null }
 
             translationSemaphore.acquire()
@@ -88,18 +81,20 @@ class TranslationPipeline(
                 }
                 val translationMs = System.currentTimeMillis() - transStart
 
+                // Update UI immediately (callback is on Main dispatcher)
                 callback?.onTranslationResult(seqId, en, zh)
                 callback?.onLatencyMeasured(translationMs, 0)
 
+                // Update paragraph record
                 paragraphMutex.withLock {
                     paragraphSentences[paragraphId]?.find { it.seqId == seqId }?.apply {
                         this.zh = zh; this.done = true
                     }
                 }
 
+                // TTS delivery
                 bufferMutex.withLock { resultBuffer[seqId] = zh }
                 tryDeliverOrdered()
-                pendingCount.decrementAndGet()
             } catch (e: Throwable) {
                 Log.e(TAG, "Translation failed seq=$seqId: ${e.message}")
                 callback?.onTranslationError(seqId, en, e.message ?: "Unknown error")
@@ -110,8 +105,8 @@ class TranslationPipeline(
                     }
                 }
                 tryDeliverOrdered()
-                pendingCount.decrementAndGet()
             } finally {
+                pendingCount.decrementAndGet()
                 translationSemaphore.release()
             }
         }
@@ -120,51 +115,50 @@ class TranslationPipeline(
 
     // ===================== TTS delivery =====================
 
-    /** Deliver completed translations to TTS in strict order. */
     private suspend fun tryDeliverOrdered() {
         val toDeliver = mutableListOf<String>()
         bufferMutex.withLock {
-            while (true) {
-                val zh = resultBuffer[nextDeliverSeqId]
-                if (zh != null) {
-                    resultBuffer.remove(nextDeliverSeqId)
-                    nextDeliverSeqId++
-                    if (zh != "[翻译失败]") toDeliver.add(zh)
-                } else break
+            while (resultBuffer.containsKey(nextDeliverSeqId)) {
+                val zh = resultBuffer.remove(nextDeliverSeqId)
+                nextDeliverSeqId++
+                if (zh != null && zh != "[翻译失败]") toDeliver.add(zh)
             }
         }
+        val cb = callback ?: return
         for (zh in toDeliver) {
-            callback?.onTtsReady(zh)
+            cb.onTtsReady(zh)
         }
     }
 
-    // ===================== Stage 2: paragraph refinement =====================
+    // ===================== Stage 2 =====================
 
     fun closeParagraph(paragraphId: Int) {
         scope.launch {
-            // Wait for all sentences in this paragraph (max 15 s)
-            var waited = 0
-            while (waited < 15000) {
+            // Wait for all sentences in this paragraph, max 10s
+            val deadline = System.currentTimeMillis() + 10_000
+            while (System.currentTimeMillis() < deadline) {
                 val allDone = paragraphMutex.withLock {
                     paragraphSentences[paragraphId]?.all { it.done } ?: true
                 }
                 if (allDone) break
-                delay(100); waited += 100
+                delay(150)
             }
 
             val ref = refiner ?: return@launch
-            val sentences = paragraphMutex.withLock {
-                paragraphSentences[paragraphId]?.filter { it.done }?.toList() ?: return@launch
-            }
-            if (sentences.isEmpty()) return@launch
+            val cb = callback ?: return@launch
 
-            val pairs = sentences.filter { it.zh.isNotBlank() }.map { it.en to it.zh }
+            val pairs = paragraphMutex.withLock {
+                paragraphSentences[paragraphId]
+                    ?.filter { it.done && it.zh.isNotBlank() }
+                    ?.map { it.en to it.zh }
+                    ?: emptyList()
+            }
             if (pairs.isEmpty()) return@launch
 
             try {
                 val refined = ref.refineParagraph(pairs)
                 if (refined.isNotBlank()) {
-                    callback?.onParagraphRefined(paragraphId, refined)
+                    cb.onParagraphRefined(paragraphId, refined)
                 }
             } catch (e: Throwable) {
                 Log.w(TAG, "Paragraph refinement failed: ${e.message}")
@@ -179,9 +173,9 @@ class TranslationPipeline(
         sequenceCounter.set(0)
         nextDeliverSeqId = 0
         pendingCount.set(0)
+        paragraphSentences.clear()
         scope.launch {
             bufferMutex.withLock { resultBuffer.clear() }
-            paragraphMutex.withLock { paragraphSentences.clear() }
         }
     }
 
@@ -190,5 +184,6 @@ class TranslationPipeline(
         sequenceCounter.set(0)
         nextDeliverSeqId = 0
         pendingCount.set(0)
+        paragraphSentences.clear()
     }
 }

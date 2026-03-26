@@ -88,11 +88,14 @@ class MainActivity : ComponentActivity() {
         val id: Int,
         val segments: List<Segment> = emptyList(),
         val refinedZh: String = "",
-        val refining: Boolean = false
+        val refining: Boolean = false,
+        val refinedAtCount: Int = 0   // segment count when refinement was done
     ) {
         val combinedEn: String get() = segments.joinToString(" ") { it.en }
         val rawZh: String get() = segments.filter { it.zh.isNotBlank() }.joinToString("") { it.zh }
-        val displayZh: String get() = refinedZh.ifBlank { rawZh }
+        /** Show refined text only if no new segments arrived after refinement. */
+        val displayZh: String get() =
+            if (refinedZh.isNotBlank() && segments.size == refinedAtCount) refinedZh else rawZh
         val anyTranslating: Boolean get() = segments.any { it.translating }
         val allDone: Boolean get() = segments.isNotEmpty() && segments.none { it.translating }
     }
@@ -696,6 +699,9 @@ class MainActivity : ComponentActivity() {
         _currentPartial = "处理中…"
         log("停止录音，处理剩余音频…")
 
+        // Capture paragraph ID before any async work
+        val lastParaId = _paragraphs.lastOrNull()?.id
+
         // Graceful stop: let ASR flush remaining buffered audio
         val flushJob: Job? = when (_asrEngine) {
             0 -> { stopSystemAsr(); null }
@@ -706,29 +712,31 @@ class MainActivity : ComponentActivity() {
         }
 
         lifecycleScope.launch {
-            // Wait for ASR flush (remaining audio processed)
-            flushJob?.let {
-                withTimeoutOrNull(5000) { it.join() } ?: run {
-                    log("ASR刷新超时，强制停止")
-                    when (_asrEngine) { 2, 3, 5 -> whisperAsr?.stop(); 4 -> sherpaWhisperAsr.stop() }
+            try {
+                // Wait for ASR flush (remaining audio processed)
+                flushJob?.let {
+                    withTimeoutOrNull(5000) { it.join() } ?: run {
+                        log("ASR刷新超时，强制停止")
+                        when (_asrEngine) { 2, 3, 5 -> whisperAsr?.stop(); 4 -> sherpaWhisperAsr.stop() }
+                    }
                 }
-            }
 
-            // Wait for all pending translations
-            var waited = 0
-            while (translationPipeline.pendingTranslations > 0 && waited < 10000) {
-                delay(100); waited += 100
-            }
+                // Wait for pending translations (max 8s)
+                val deadline = System.currentTimeMillis() + 8000
+                while (translationPipeline.pendingTranslations > 0 && System.currentTimeMillis() < deadline) {
+                    delay(100)
+                }
 
-            // Close current paragraph → trigger refinement
-            if (_paragraphs.isNotEmpty()) {
-                closeParagraph(_paragraphs.lastIndex)
+                // Close current paragraph → trigger refinement
+                if (lastParaId != null) {
+                    closeParagraphById(lastParaId)
+                }
+            } finally {
+                _stopping = false
+                _currentPartial = ""
+                stopDeviceMetrics()
+                log("所有处理已完成")
             }
-
-            _stopping = false
-            _currentPartial = ""
-            stopDeviceMetrics()
-            log("所有处理已完成")
         }
     }
 
@@ -951,7 +959,7 @@ class MainActivity : ComponentActivity() {
         _mediaCaptureStatus = ""
         _mediaSourceApp = ""
         // Close any active paragraph on media capture stop
-        if (_paragraphs.isNotEmpty()) closeParagraph(_paragraphs.lastIndex)
+        _paragraphs.lastOrNull()?.id?.let { closeParagraphById(it) }
         log("媒体捕获已停止")
     }
 
@@ -1012,6 +1020,7 @@ class MainActivity : ComponentActivity() {
      * No re-segmentation.  Paragraph breaks are detected by silence gaps.
      */
     private fun onAsrResult(text: String) {
+        if (_stopping) return   // Don't accept new ASR results while stopping
         paragraphGapJob?.cancel()
 
         // TTS echo suppression
@@ -1038,38 +1047,42 @@ class MainActivity : ComponentActivity() {
     private fun addSegmentToParagraph(text: String) {
         _currentPartial = ""
 
-        // Ensure current paragraph exists
-        if (_paragraphs.isEmpty() || _paragraphs.last().let { it.refinedZh.isNotBlank() || (!it.anyTranslating && it.allDone && it.segments.size >= 8) }) {
+        // Ensure current paragraph exists (start new one if previous is already refined or full)
+        if (_paragraphs.isEmpty() || _paragraphs.last().let {
+                it.refinedZh.isNotBlank() || (!it.anyTranslating && it.allDone && it.segments.size >= 8)
+            }) {
             _paragraphs.add(Paragraph(id = _nextParagraphId++))
         }
 
         val paraIdx = _paragraphs.lastIndex
         val para = _paragraphs[paraIdx]
+        val paraId = para.id
 
         // Submit for translation — get seqId first so Segment can track it
-        val seqId = translationPipeline.submitSentence(para.id, text)
+        val seqId = translationPipeline.submitSentence(paraId, text)
         val newSeg = Segment(seqId = seqId, en = text, translating = true)
         _paragraphs[paraIdx] = para.copy(segments = para.segments + newSeg)
 
         // History
         translationHistory.append(text, "")
 
-        // Reset paragraph gap timer — if speaker pauses for PARAGRAPH_GAP_MS, close paragraph
+        // Reset paragraph gap timer — use paragraph ID (stable) not index (can shift)
+        paragraphGapJob?.cancel()
         paragraphGapJob = lifecycleScope.launch {
             delay(PARAGRAPH_GAP_MS)
-            closeParagraph(paraIdx)
+            closeParagraphById(paraId)
         }
     }
 
-    /** Close a paragraph: trigger Stage 2 refinement. */
-    private fun closeParagraph(paraIdx: Int) {
-        if (paraIdx < 0 || paraIdx >= _paragraphs.size) return
-        val para = _paragraphs[paraIdx]
+    /** Close a paragraph by its stable ID: trigger Stage 2 refinement. */
+    private fun closeParagraphById(paragraphId: Int) {
+        val pi = _paragraphs.indexOfFirst { it.id == paragraphId }
+        if (pi < 0) return
+        val para = _paragraphs[pi]
         if (para.segments.isEmpty() || para.refining || para.refinedZh.isNotBlank()) return
 
-        // Mark as refining
-        _paragraphs[paraIdx] = para.copy(refining = true)
-        translationPipeline.closeParagraph(para.id)
+        _paragraphs[pi] = para.copy(refining = true)
+        translationPipeline.closeParagraph(paragraphId)
     }
 
     // ===================== Translation Engine =====================
@@ -1192,8 +1205,15 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 val pi = _paragraphs.indexOfFirst { it.id == paragraphId }
                 if (pi >= 0) {
-                    _paragraphs[pi] = _paragraphs[pi].copy(refinedZh = refinedZh, refining = false)
-                    log("段落润色完成 (${_paragraphs[pi].segments.size}句)")
+                    val current = _paragraphs[pi]
+                    // Record how many segments existed when refinement was done
+                    // so displayZh can fall back to rawZh if new segments arrive later
+                    _paragraphs[pi] = current.copy(
+                        refinedZh = refinedZh,
+                        refining = false,
+                        refinedAtCount = current.segments.size
+                    )
+                    log("段落润色完成 (${current.segments.size}句)")
                 }
             }
         }
@@ -2575,7 +2595,7 @@ class MainActivity : ComponentActivity() {
             elevation = CardDefaults.cardElevation(1.dp)
         ) {
             Column(Modifier.padding(14.dp)) {
-                // English: all sentences combined
+                // English: all sentences combined — always visible immediately
                 Text(para.combinedEn, fontSize = 14.sp, lineHeight = 20.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
 
@@ -2583,7 +2603,7 @@ class MainActivity : ComponentActivity() {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                 Spacer(Modifier.height(6.dp))
 
-                // Chinese: show refined paragraph if available, otherwise raw concatenation
+                // Chinese: always show whatever is available (rawZh grows in real time)
                 val zh = para.displayZh
                 if (zh.isNotBlank()) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -2596,29 +2616,31 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
+                } else if (para.anyTranslating) {
+                    // No Chinese yet but translation in progress — show spinner inline
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("翻译中…", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                    }
                 }
 
-                // Status: translating / refining
-                if (para.anyTranslating) {
+                // Status row: show progress or refinement state
+                if (zh.isNotBlank() && para.anyTranslating) {
                     Spacer(Modifier.height(4.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
-                        Spacer(Modifier.width(6.dp))
-                        val done = para.segments.count { !it.translating }
-                        Text("翻译中 ($done/${para.segments.size})", fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.primary)
-                    }
+                    val done = para.segments.count { !it.translating }
+                    Text("翻译中 ($done/${para.segments.size})", fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
                 } else if (para.refining) {
                     Spacer(Modifier.height(4.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
-                        Spacer(Modifier.width(6.dp))
-                        Text("润色中…", fontSize = 11.sp, color = MaterialTheme.colorScheme.tertiary)
+                        CircularProgressIndicator(Modifier.size(10.dp), strokeWidth = 1.5.dp)
+                        Spacer(Modifier.width(4.dp))
+                        Text("润色中…", fontSize = 10.sp, color = MaterialTheme.colorScheme.tertiary)
                     }
-                } else if (para.refinedZh.isNotBlank()) {
-                    // Show subtle indicator that this paragraph was AI-refined
+                } else if (para.refinedZh.isNotBlank() && para.segments.size == para.refinedAtCount) {
                     Spacer(Modifier.height(2.dp))
-                    Text("✦ AI 润色", fontSize = 9.sp, color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.5f))
+                    Text("✦ AI", fontSize = 9.sp, color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.4f))
                 }
             }
         }
