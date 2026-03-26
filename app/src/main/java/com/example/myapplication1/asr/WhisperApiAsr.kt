@@ -230,20 +230,24 @@ class WhisperApiAsr(
     }
 
     /**
-     * Fallback: energy-based VAD when Silero model not available.
-     * Fixed: shorter silence threshold, max duration cap, concurrent API calls.
+     * Fallback: simple energy-based VAD. Only used when Silero model is unavailable.
+     * Less accurate than Silero — uses dB threshold and fixed silence duration.
+     * Concurrent API calls to avoid blocking the audio loop.
      */
     private suspend fun CoroutineScope.runWithSimpleVad(callback: Callback) {
+        // Warn user that they're on the inferior fallback
+        withContext(Dispatchers.Main) {
+            callback.onError("未检测到Silero VAD模型，使用简易语音检测（精度较低）")
+        }
+
         val buffer = ShortArray(1024)
         val speechBuffer = ByteArrayOutputStream()
         var inSpeech = false
         var silenceFrames = 0
-        var speechFrames = 0
         val msPerFrame = (buffer.size * 1000) / SAMPLE_RATE
-        val silenceFramesNeeded = 400 / msPerFrame    // 400ms silence = segment end (was 800ms)
-        val minPcmBytes = 300 * SAMPLE_RATE * 2 / 1000  // 300ms min
-        val maxSpeechMs = 8000                         // force-segment after 8s continuous speech
-        val maxSpeechFrames = maxSpeechMs / msPerFrame
+        // Silence detection: ~300ms of silence ends a segment (same as Silero's minSilenceDuration)
+        val silenceFramesNeeded = 300 / msPerFrame
+        val minPcmBytes = 300 * SAMPLE_RATE * 2 / 1000
 
         while (isActive && recording) {
             val read = audioRecord?.read(buffer, 0, buffer.size) ?: break
@@ -257,24 +261,12 @@ class WhisperApiAsr(
                 if (!inSpeech) {
                     inSpeech = true
                     speechBuffer.reset()
-                    speechFrames = 0
                     withContext(Dispatchers.Main) { callback.onSpeechDetected() }
                 }
                 silenceFrames = 0
-                speechFrames++
                 val byteBuffer = ByteBuffer.allocate(read * 2).order(ByteOrder.LITTLE_ENDIAN)
                 for (i in 0 until read) byteBuffer.putShort(buffer[i])
                 speechBuffer.write(byteBuffer.array())
-
-                // Force-segment on max duration (prevents infinite buffering)
-                if (speechFrames >= maxSpeechFrames && speechBuffer.size() > minPcmBytes) {
-                    val pcm = speechBuffer.toByteArray()
-                    speechBuffer.reset()
-                    speechFrames = 0
-                    silenceFrames = 0
-                    inSpeech = false
-                    launch { sendToApi(pcm, callback) }  // concurrent!
-                }
             } else if (inSpeech) {
                 silenceFrames++
                 val byteBuffer = ByteBuffer.allocate(read * 2).order(ByteOrder.LITTLE_ENDIAN)
@@ -285,17 +277,14 @@ class WhisperApiAsr(
                     inSpeech = false
                     val pcm = speechBuffer.toByteArray()
                     speechBuffer.reset()
-                    speechFrames = 0
                     silenceFrames = 0
-
                     if (pcm.size > minPcmBytes) {
-                        launch { sendToApi(pcm, callback) }  // concurrent!
+                        launch { sendToApi(pcm, callback) }
                     }
                 }
             }
         }
 
-        // Flush remaining audio
         if (inSpeech && speechBuffer.size() > minPcmBytes) {
             val pcm = speechBuffer.toByteArray()
             sendToApi(pcm, callback)
