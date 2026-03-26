@@ -488,12 +488,10 @@ class MainActivity : ComponentActivity() {
 
     private fun startTtsConsumer() {
         ttsConsumerJob = lifecycleScope.launch {
-            // Edge TTS prefetch state: synthesize next sentence during current playback
             var prefetchedFile: java.io.File? = null
-            var pendingText: String? = null  // text consumed from queue during prefetch
+            var pendingText: String? = null
 
             while (true) {
-                // Get next text: either from prefetch buffer or from queue
                 val text = if (pendingText != null) {
                     pendingText.also { pendingText = null }
                 } else {
@@ -503,54 +501,65 @@ class MainActivity : ComponentActivity() {
                 _ttsQueueSize = ttsPendingCount.get()
                 if (_autoSpeak) {
                     val ttsStart = System.currentTimeMillis()
-                    if (_ttsEngine == 0) {
-                        // Edge TTS with prefetch overlap and streaming fallback
-                        val v = EdgeTts.ZH_VOICES.getOrNull(_edgeVoiceIdx)?.first ?: "zh-CN-XiaoxiaoNeural"
-                        val rate = dynamicEdgeRate()
+                    // Wrap ALL TTS playback in try/catch — a single failure must NOT
+                    // kill the consumer coroutine, otherwise all future auto-TTS stops.
+                    try {
+                        if (_ttsEngine == 0) {
+                            val v = EdgeTts.ZH_VOICES.getOrNull(_edgeVoiceIdx)?.first ?: "zh-CN-XiaoxiaoNeural"
+                            val rate = dynamicEdgeRate()
 
-                        if (prefetchedFile != null) {
-                            // Have prefetched file — play it + prefetch next
-                            val audioFile = prefetchedFile!!
-                            prefetchedFile = null
-                            val prefetchJob = launch {
-                                val next = ttsQueue.tryReceive().getOrNull()
-                                if (next != null) {
-                                    pendingText = next
-                                    prefetchedFile = edgeTts.synthesizeToFile(next, voice = v, rate = rate)
+                            if (prefetchedFile != null) {
+                                val audioFile = prefetchedFile!!
+                                prefetchedFile = null
+                                val prefetchJob = launch {
+                                    try {
+                                        val next = ttsQueue.tryReceive().getOrNull()
+                                        if (next != null) {
+                                            pendingText = next
+                                            prefetchedFile = edgeTts.synthesizeToFile(next, voice = v, rate = rate)
+                                        }
+                                    } catch (_: Throwable) {}
                                 }
+                                _isTtsSpeaking = true
+                                try {
+                                    edgeTts.playFile(audioFile)
+                                } finally {
+                                    _isTtsSpeaking = false
+                                    _ttsSpeakEndTime = System.currentTimeMillis()
+                                }
+                                audioFile.delete()
+                                prefetchJob.join()
+                            } else {
+                                val prefetchJob = launch {
+                                    try {
+                                        val next = ttsQueue.tryReceive().getOrNull()
+                                        if (next != null) {
+                                            pendingText = next
+                                            prefetchedFile = edgeTts.synthesizeToFile(next, voice = v, rate = rate)
+                                        }
+                                    } catch (_: Throwable) {}
+                                }
+                                _isTtsSpeaking = true
+                                try {
+                                    edgeTts.synthesizeAndPlay(text, voice = v, rate = rate)
+                                } finally {
+                                    _isTtsSpeaking = false
+                                    _ttsSpeakEndTime = System.currentTimeMillis()
+                                }
+                                prefetchJob.join()
                             }
-                            _isTtsSpeaking = true
-                            try {
-                                edgeTts.playFile(audioFile)
-                            } finally {
-                                _isTtsSpeaking = false
-                                _ttsSpeakEndTime = System.currentTimeMillis()
-                            }
-                            audioFile.delete()
-                            prefetchJob.join()
                         } else {
-                            // No prefetch — use streaming synthesis+playback (starts playing immediately)
-                            // Also prefetch next sentence during streaming playback
-                            val prefetchJob = launch {
-                                val next = ttsQueue.tryReceive().getOrNull()
-                                if (next != null) {
-                                    pendingText = next
-                                    prefetchedFile = edgeTts.synthesizeToFile(next, voice = v, rate = rate)
-                                }
-                            }
-                            _isTtsSpeaking = true
-                            try {
-                                edgeTts.synthesizeAndPlay(text, voice = v, rate = rate)
-                            } finally {
-                                _isTtsSpeaking = false
-                                _ttsSpeakEndTime = System.currentTimeMillis()
-                            }
-                            prefetchJob.join()
+                            speakZh(text)
                         }
-                    } else {
-                        speakZh(text)
+                        _ttsLatencyMs = System.currentTimeMillis() - ttsStart
+                    } catch (e: Throwable) {
+                        // TTS failed for this sentence — log and continue to next
+                        Log.e("VRI", "TTS playback error: ${e.message}")
+                        _isTtsSpeaking = false
+                        _ttsSpeakEndTime = System.currentTimeMillis()
+                        // Discard broken prefetch state
+                        prefetchedFile?.delete(); prefetchedFile = null; pendingText = null
                     }
-                    _ttsLatencyMs = System.currentTimeMillis() - ttsStart
                 }
                 ttsPendingCount.decrementAndGet()
                 _ttsQueueSize = ttsPendingCount.get()
