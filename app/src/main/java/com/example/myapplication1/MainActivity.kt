@@ -94,6 +94,11 @@ class MainActivity : ComponentActivity() {
         val allDone: Boolean get() = segments.isNotEmpty() && segments.none { it.translating }
     }
 
+    companion object {
+        /** Sentinel seqId for synthetic segments created by paragraph refinement. */
+        private const val REFINED_SEGMENT_ID = -1
+    }
+
     private val _paragraphs = mutableStateListOf<Paragraph>()
     private var _nextParagraphId = 0
     private var _currentPartial by mutableStateOf("")
@@ -137,6 +142,9 @@ class MainActivity : ComponentActivity() {
     private var _mediaCaptureError by mutableStateOf("")
 
     // ---- 段落管理 ----
+    /** Silence-based paragraph break: fire after this many ms without a new ASR result. */
+    private val PARAGRAPH_SILENCE_MS = 4000L
+    private var paragraphSilenceJob: Job? = null
 
     // ---- 翻译引擎缓存 ----
     private var cachedTransEngine: TranslationEngine? = null
@@ -163,7 +171,18 @@ class MainActivity : ComponentActivity() {
     // ---- TTS 回声抑制 ----
     @Volatile private var _isTtsSpeaking = false
     private var _ttsSpeakEndTime = 0L
-    private val TTS_ECHO_GRACE_MS = 300L  // ASR结果在TTS结束后此时间内仍被抑制
+    /** Minimum grace period after TTS ends before ASR results are accepted again. */
+    private val TTS_ECHO_GRACE_BASE_MS = 200L
+    /** Extra ms per Chinese character in last TTS output (speech lingers after audio). */
+    private val TTS_ECHO_GRACE_PER_CHAR_MS = 15L
+    @Volatile private var _lastTtsLength = 0
+
+    /** Dynamic echo grace: longer TTS output = longer grace period to catch reverb. */
+    private fun ttsEchoGraceMs(): Long =
+        TTS_ECHO_GRACE_BASE_MS + (_lastTtsLength * TTS_ECHO_GRACE_PER_CHAR_MS).coerceAtMost(1500L)
+
+    // ---- 翻译缓存命中指标 ----
+    private var _transCacheHits by mutableStateOf(0L)
 
     // ---- 设备指标 ----
     private var _cpuUsagePct by mutableStateOf(0f)
@@ -379,6 +398,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         FloatingTranslateService.translationCallback = null
         MediaCaptureService.asrCallback = null
+        paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
         ttsConsumerJob?.cancel(); ttsQueue.close(); stopDeviceMetrics()
         if (::translationPipeline.isInitialized) translationPipeline.close()
         stopAllAsr(); stopMediaCapture()
@@ -478,17 +498,40 @@ class MainActivity : ComponentActivity() {
 
     // ===================== TTS =====================
 
+    /**
+     * Maximum TTS queue depth before we start dropping intermediate items.
+     * At this depth we drain all but the newest item in the queue so playback
+     * catches up to the live translation stream (duplex timeliness).
+     */
+    private val TTS_QUEUE_DRAIN_THRESHOLD = 4
+
     private fun startTtsConsumer() {
         ttsConsumerJob = lifecycleScope.launch {
             while (true) {
                 val text = ttsQueue.receiveCatching().getOrNull() ?: break
                 _ttsQueueSize = ttsPendingCount.get()
+
+                // Smart queue drain: if too many items queued, skip intermediate ones
+                // to catch up to the live speech stream (improves duplex timeliness).
+                var textToSpeak = text
+                if (ttsPendingCount.get() > TTS_QUEUE_DRAIN_THRESHOLD) {
+                    var skipped = 0
+                    while (ttsPendingCount.get() > 1) {
+                        val next = ttsQueue.tryReceive().getOrNull() ?: break
+                        ttsPendingCount.decrementAndGet()
+                        skipped++
+                        textToSpeak = next  // keep moving forward to latest item
+                    }
+                    if (skipped > 0) Log.d("VRI", "TTS queue drain: skipped $skipped items")
+                    _ttsQueueSize = ttsPendingCount.get()
+                }
+
                 if (_autoSpeak) {
                     val ttsStart = System.currentTimeMillis()
                     try {
                         // Use the SAME speakZh path for all engines (auto + manual).
                         // This ensures consistent behavior and fallback on failure.
-                        speakZh(text)
+                        speakZh(textToSpeak)
                         _ttsLatencyMs = System.currentTimeMillis() - ttsStart
                     } catch (e: Throwable) {
                         Log.e("VRI", "TTS error: ${e.message}")
@@ -570,6 +613,7 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun speakZh(text: String) {
         _isTtsSpeaking = true
+        _lastTtsLength = text.length
         try {
             when (_ttsEngine) { 0 -> speakEdge(text); 1 -> speakSystem(text); 2 -> speakGoogle(text); 3 -> speakOpenAi(text) }
         } finally {
@@ -637,6 +681,9 @@ class MainActivity : ComponentActivity() {
         if (!_recording) return
         _recording = false
         log("停止录音")
+
+        // Cancel any pending silence-based paragraph break timer
+        paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
 
         when (_asrEngine) {
             0 -> stopSystemAsr()
@@ -929,8 +976,8 @@ class MainActivity : ComponentActivity() {
      * No re-segmentation.  Paragraph breaks are detected by silence gaps.
      */
     private fun onAsrResult(text: String) {
-        // TTS echo suppression
-        if (_isTtsSpeaking || System.currentTimeMillis() - _ttsSpeakEndTime < TTS_ECHO_GRACE_MS) {
+        // TTS echo suppression — dynamic grace based on last TTS output length
+        if (_isTtsSpeaking || System.currentTimeMillis() - _ttsSpeakEndTime < ttsEchoGraceMs()) {
             Log.d("MainActivity", "ASR result suppressed during TTS: ${text.take(30)}")
             return
         }
@@ -948,10 +995,17 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Add an ASR utterance as a new segment in the current paragraph.
-     * Creates a new paragraph if none exists.  Resets the paragraph gap timer.
+     * Creates a new paragraph if none exists.  Resets the silence-based paragraph break timer.
+     *
+     * Paragraph breaks are triggered by:
+     * 1. Count-based: current paragraph has >= 8 segments (hard cap)
+     * 2. Silence-based: PARAGRAPH_SILENCE_MS elapses with no new ASR result
      */
     private fun addSegmentToParagraph(text: String) {
         _currentPartial = ""
+
+        // Cancel any pending silence-based paragraph break
+        paragraphSilenceJob?.cancel()
 
         // Start new paragraph if needed (previous full or empty list)
         if (_paragraphs.isEmpty() || (_paragraphs.last().allDone && _paragraphs.last().segments.size >= 8)) {
@@ -973,6 +1027,23 @@ class MainActivity : ComponentActivity() {
 
         // 4. History
         translationHistory.append(text, "")
+
+        // 5. Schedule silence-based paragraph break
+        val currentParaId = para.id
+        paragraphSilenceJob = lifecycleScope.launch {
+            delay(PARAGRAPH_SILENCE_MS)
+            // Silence elapsed — start a fresh paragraph on the next utterance
+            // so this paragraph's context is clean for future ASR results.
+            // We also trigger refinement for the completed paragraph.
+            if (_paragraphs.isNotEmpty()) {
+                val lastPara = _paragraphs.last()
+                if (lastPara.id == currentParaId && lastPara.segments.isNotEmpty()) {
+                    translationPipeline.closeParagraph(currentParaId)
+                    // Add new empty paragraph as the next container
+                    _paragraphs.add(Paragraph(id = _nextParagraphId++))
+                }
+            }
+        }
     }
 
     // ===================== Translation Engine =====================
@@ -1006,6 +1077,8 @@ class MainActivity : ComponentActivity() {
         if (::translationPipeline.isInitialized) {
             translationPipeline.setEngine(getTranslationEngine())
             translationPipeline.setRefiner(buildRefiner())
+            // Clear translation cache when engine changes to avoid stale results
+            translationPipeline.clearCache()
         }
     }
 
@@ -1089,8 +1162,23 @@ class MainActivity : ComponentActivity() {
             _transLatencyMs = translationMs
         }
 
+        override fun onCacheHit(seqId: Int) {
+            _transCacheHits = translationPipeline.cacheHitCount
+        }
+
         override fun onParagraphRefined(paragraphId: Int, refinedZh: String) {
-            // Paragraph refinement disabled — per-sentence display only
+            if (refinedZh.isBlank()) return
+            // Update the matching paragraph's display text with the refined version
+            for (pi in _paragraphs.indices) {
+                val para = _paragraphs[pi]
+                if (para.id == paragraphId) {
+                    // Replace combined display with refined text as a single synthetic segment
+                    val refinedSeg = Segment(seqId = REFINED_SEGMENT_ID, en = para.combinedEn, zh = refinedZh, translating = false)
+                    _paragraphs[pi] = para.copy(segments = listOf(refinedSeg))
+                    Log.d("VRI", "Paragraph $paragraphId refined: ${refinedZh.take(60)}")
+                    return
+                }
+            }
         }
     }
 
@@ -1102,6 +1190,7 @@ class MainActivity : ComponentActivity() {
         for (n in assets.list(a) ?: emptyArray()) { val p = "$a/$n"; val c = assets.list(p); if (c.isNullOrEmpty()) assets.open(p).use { i -> FileOutputStream(File(d, n)).use { o -> i.copyTo(o) } } else copyAssetDir(p, File(d, n)) }
     }
     private fun clearAll() {
+        paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
         _paragraphs.clear(); _nextParagraphId = 0; _currentPartial = ""
         if (::translationPipeline.isInitialized) translationPipeline.reset()
         log("已清空")
@@ -1196,6 +1285,7 @@ class MainActivity : ComponentActivity() {
                                     if (_ttsLatencyMs > 0) Text("TTS: ${_ttsLatencyMs}ms", fontSize = 10.sp, color = dimColor)
                                     if (_ttsQueueSize > 0) Text("队列: $_ttsQueueSize", fontSize = 10.sp, color = Color(0xFFEF5350))
                                     if (_ttsSpeedPct > 0) Text("语速: +${_ttsSpeedPct}%", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
+                                    if (_transCacheHits > 0) Text("缓存: $_transCacheHits", fontSize = 10.sp, color = Color(0xFF4CAF50))
                                 }
                                 // 设备指标
                                 if (_cpuUsagePct > 0f || _memoryUsageMB > 0) {

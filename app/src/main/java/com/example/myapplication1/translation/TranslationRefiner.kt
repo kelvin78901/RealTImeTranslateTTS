@@ -1,6 +1,7 @@
 package com.example.myapplication1.translation
 
 import android.util.Log
+import java.io.BufferedReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -46,24 +47,25 @@ class TranslationRefiner(
 
         // ---- Paragraph-level prompt (primary) ----
         private const val PARAGRAPH_REFINE_PROMPT =
-            "你是同声传译后处理器。下方列出了语音识别逐句输出的英文及其机器翻译。\n" +
-            "请将这些翻译整合为一段连贯、自然的中文。\n\n" +
-            "处理要求：\n" +
-            "1. 合并被错误截断的句子片段（ASR常将一句话拆成多段）\n" +
-            "2. 修正语法错误和不自然的表达\n" +
-            "3. 补全因语音识别截断导致的不完整句子\n" +
-            "4. 保持原意，不要添加额外信息\n" +
-            "5. 输出一段完整通顺的中文，不要编号、不要引号、不要解释"
+            "你是专业同声传译后处理器。\n" +
+            "以下是语音识别（ASR）逐句切分的英文原文及其逐句机器翻译。\n" +
+            "请将这些翻译整合为一段连贯、自然的书面中文。\n\n" +
+            "处理规则（按优先级）：\n" +
+            "1. 【合并截断】ASR 常将一句完整话语切成多个短片段，请识别并合并\n" +
+            "2. 【修正语法】改正语法错误、主谓搭配错误、量词错误\n" +
+            "3. 【提升自然度】将逐字直译改为符合中文表达习惯的地道说法\n" +
+            "4. 【保持原意】不增添、不删减关键信息\n" +
+            "5. 【格式要求】只输出最终中文段落，不加编号、引号、注释或任何额外字符"
 
         /** Single-pass translate entire paragraph (for LLM-based translation engines). */
         private const val PARAGRAPH_TRANSLATE_PROMPT =
-            "你是专业同声传译员。下方是语音识别逐句输出的英文。\n" +
-            "请将整段内容翻译为一段连贯、自然的中文。\n\n" +
-            "处理要求：\n" +
-            "1. 合并被错误截断的句子片段（ASR常将一句话拆成多段）\n" +
-            "2. 翻译准确自然，符合中文表达习惯\n" +
-            "3. 补全因截断导致的不完整句子\n" +
-            "4. 输出一段完整通顺的中文，不要编号、不要引号、不要解释"
+            "你是专业同声传译员（英译中）。\n" +
+            "以下是语音识别（ASR）逐句切分的英文，可能存在截断片段。\n" +
+            "请将整段内容翻译为一段连贯、自然的书面中文。\n\n" +
+            "处理规则：\n" +
+            "1. 【合并截断】识别并合并被 ASR 错误切分的句子片段\n" +
+            "2. 【准确翻译】忠实原文，符合中文表达习惯\n" +
+            "3. 【格式要求】只输出最终中文段落，不加编号、引号、注释或任何额外字符"
 
         /** Provider constants */
         const val PROVIDER_OFF = 0
@@ -311,8 +313,12 @@ class TranslationRefiner(
 
     private suspend fun callLlm(systemPrompt: String, userMsg: String): String =
         withContext(Dispatchers.IO) {
-            // Scale max_tokens based on input length to avoid truncation on long paragraphs
-            val estimatedTokens = kotlin.math.max(1000, userMsg.length * 2)
+            // Scale max_tokens based on input length to avoid truncation on long paragraphs.
+            // Heuristic: Chinese output is ~1.5x the English word count and each Chinese
+            // character costs ~2 tokens (BPE), so tokens ≈ words × 1.5 × 2 = words × 3.
+            // Upper bound is 2000 because paragraph refinement may process many sentences.
+            val inputWords = userMsg.split(Regex("""\s+""")).size
+            val estimatedTokens = (inputWords * 3).coerceIn(200, 2000)
             val json = JSONObject().apply {
                 put("model", model)
                 put("messages", JSONArray().apply {
@@ -325,8 +331,9 @@ class TranslationRefiner(
                         put("content", userMsg)
                     })
                 })
-                put("temperature", 0.3)
+                put("temperature", 0.2)  // Lower temperature = more deterministic, accurate output
                 put("max_tokens", estimatedTokens)
+                put("stream", true)
             }
 
             val request = Request.Builder()
@@ -336,14 +343,11 @@ class TranslationRefiner(
                 .build()
 
             val response = (if (isLocal) localClient else cloudClient).newCall(request).execute()
-            val body = response.body?.string() ?: throw Exception("Empty response")
-            if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+            if (!response.isSuccessful) {
+                val errBody = response.body?.string() ?: ""
+                throw Exception("HTTP ${response.code}: $errBody")
+            }
 
-            JSONObject(body)
-                .getJSONArray("choices")
-                .getJSONObject(0)
-                .getJSONObject("message")
-                .getString("content")
-                .trim()
+            collectSseTokens(response.body?.charStream()?.buffered())
         }
 }

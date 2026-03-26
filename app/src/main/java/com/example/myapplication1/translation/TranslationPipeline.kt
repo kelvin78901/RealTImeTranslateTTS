@@ -2,17 +2,31 @@ package com.example.myapplication1.translation
 
 import android.util.Log
 import kotlinx.coroutines.*
+import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Minimal translation pipeline: translate each sentence ASAP, TTS ASAP.
  * No ordering, no queuing, no semaphores — pure speed.
  *
- * Paragraph refinement is fire-and-forget background work that only updates display.
+ * Features:
+ * - LRU translation cache: repeated phrases hit cache instantly (0ms latency).
+ * - Paragraph refinement is fire-and-forget background work that only updates display.
  */
 class TranslationPipeline(private val scope: CoroutineScope) {
 
-    companion object { private const val TAG = "TransPipeline" }
+    companion object {
+        private const val TAG = "TransPipeline"
+
+        /** Maximum number of entries in the translation LRU cache. */
+        private const val CACHE_MAX_SIZE = 200
+
+        /** Normalize English text for cache key: lowercase, collapse whitespace. */
+        @JvmStatic
+        fun normalizeCacheKey(text: String): String =
+            text.trim().lowercase().replace(Regex("""\s+"""), " ")
+    }
 
     interface Callback {
         fun onTranslationStarted(seqId: Int, en: String)
@@ -20,11 +34,23 @@ class TranslationPipeline(private val scope: CoroutineScope) {
         fun onTranslationError(seqId: Int, en: String, error: String)
         fun onTtsReady(zh: String)
         fun onLatencyMeasured(translationMs: Long)
+        fun onCacheHit(seqId: Int)
         fun onParagraphRefined(paragraphId: Int, refinedZh: String)
     }
 
     private val seqCounter = AtomicInteger(0)
     private val pendingCount = AtomicInteger(0)
+
+    // LRU cache: normalized English → Chinese translation
+    private val translationCache: LinkedHashMap<String, String> =
+        object : LinkedHashMap<String, String>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) =
+                size > CACHE_MAX_SIZE
+        }
+
+    // Cache statistics
+    private val cacheHits = AtomicLong(0)
+    private val cacheMisses = AtomicLong(0)
 
     // Paragraph: just stores (en,zh) pairs for later refinement — no blocking
     private val paragraphData = mutableMapOf<Int, MutableList<Pair<String, String>>>()
@@ -34,6 +60,8 @@ class TranslationPipeline(private val scope: CoroutineScope) {
     private var refiner: TranslationRefiner? = null
 
     val pendingTranslations: Int get() = pendingCount.get()
+    val cacheHitCount: Long get() = cacheHits.get()
+    val cacheMissCount: Long get() = cacheMisses.get()
 
     fun setCallback(cb: Callback?) { callback = cb }
     fun setEngine(eng: TranslationEngine?) { engine = eng }
@@ -43,10 +71,44 @@ class TranslationPipeline(private val scope: CoroutineScope) {
     fun allocateSeqId(): Int = seqCounter.getAndIncrement()
 
     /**
+     * Evict the translation cache. Call when engine changes or context shifts significantly.
+     */
+    fun clearCache() {
+        synchronized(translationCache) { translationCache.clear() }
+        cacheHits.set(0)
+        cacheMisses.set(0)
+        Log.d(TAG, "Translation cache cleared")
+    }
+
+    /**
      * Start translating a sentence with a pre-allocated seqId.
      * Caller MUST have already updated UI state with this seqId.
+     *
+     * Cache lookup is performed on the calling thread (Main) for zero latency on hit.
+     * On a cache miss the translation is dispatched to IO and results are delivered async.
      */
     fun submitSentence(seqId: Int, paragraphId: Int, en: String) {
+        // ---- Fast path: cache lookup on calling thread ----
+        val key = normalizeCacheKey(en)
+        val cached: String? = synchronized(translationCache) { translationCache[key] }
+        if (cached != null) {
+            cacheHits.incrementAndGet()
+            Log.d(TAG, "Cache hit [$key] → $cached")
+            // Deliver on Main (we are already on Main, but stay consistent with async path)
+            scope.launch(Dispatchers.Main) {
+                callback?.onTranslationResult(seqId, en, cached)
+                callback?.onLatencyMeasured(0L)
+                callback?.onCacheHit(seqId)
+                callback?.onTtsReady(cached)
+            }
+            synchronized(paragraphData) {
+                paragraphData.getOrPut(paragraphId) { mutableListOf() }.add(en to cached)
+            }
+            return
+        }
+
+        // ---- Slow path: call translation engine ----
+        cacheMisses.incrementAndGet()
         pendingCount.incrementAndGet()
 
         scope.launch(Dispatchers.IO) {
@@ -55,6 +117,11 @@ class TranslationPipeline(private val scope: CoroutineScope) {
                 val t0 = System.currentTimeMillis()
                 val zh = eng.translate(en)
                 val ms = System.currentTimeMillis() - t0
+
+                // Populate cache for future identical sentences
+                if (zh.isNotBlank()) {
+                    synchronized(translationCache) { translationCache[key] = zh }
+                }
 
                 // Store for later paragraph refinement
                 synchronized(paragraphData) {
@@ -114,6 +181,11 @@ class TranslationPipeline(private val scope: CoroutineScope) {
         }
     }
 
+    /**
+     * Reset state for a new session (e.g. "clear all" button).
+     * Keeps the LRU translation cache alive: common phrases from prior sessions
+     * are still valid translations regardless of session context.
+     */
     fun reset() {
         callback = null
         seqCounter.set(0)
@@ -121,9 +193,16 @@ class TranslationPipeline(private val scope: CoroutineScope) {
         synchronized(paragraphData) { paragraphData.clear() }
     }
 
+    /**
+     * Release all resources.  Unlike [reset], this also clears the cache because
+     * the Activity is being destroyed and the pipeline will be reconstructed.
+     * Clearing avoids returning stale results to a future pipeline instance
+     * that may use a different engine.
+     */
     fun close() {
         callback = null; engine = null; refiner = null
         seqCounter.set(0); pendingCount.set(0)
         synchronized(paragraphData) { paragraphData.clear() }
+        synchronized(translationCache) { translationCache.clear() }
     }
 }
