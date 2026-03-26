@@ -354,37 +354,46 @@ class SherpaWhisperAsr(private val context: Context) {
                 Log.d(TAG, "decoder coroutine ended")
             }
 
-            // Audio loop: reads mic → feeds VAD → sends segments to channel (never blocks on decode)
-            while (isActive && recording) {
-                val read = audioRecord?.read(buffer, 0, buffer.size) ?: break
-                if (read <= 0) continue
+            // Audio loop: reads mic → feeds VAD → sends segments to channel
+            try {
+                while (isActive && recording) {
+                    val read = try {
+                        audioRecord?.read(buffer, 0, buffer.size) ?: break
+                    } catch (_: Throwable) { break }
+                    if (read <= 0) continue
 
-                val floatSamples = FloatArray(read) { buffer[it] / 32768.0f }
-                localVad.acceptWaveform(floatSamples)
+                    val floatSamples = FloatArray(read) { buffer[it] / 32768.0f }
+                    localVad.acceptWaveform(floatSamples)
 
-                if (localVad.isSpeechDetected()) {
-                    withContext(Dispatchers.Main) { callback.onSpeechDetected() }
+                    if (localVad.isSpeechDetected()) {
+                        withContext(Dispatchers.Main) { callback.onSpeechDetected() }
+                    }
+
+                    while (!localVad.empty()) {
+                        val segment = localVad.front()
+                        localVad.pop()
+                        val copied = segment.samples.copyOf()
+                        Log.d(TAG, "VAD segment: ${copied.size} samples (${copied.size * 1000 / SAMPLE_RATE}ms)")
+                        segmentCh.trySend(copied)
+                    }
                 }
-
+            } finally {
+                // ALWAYS flush — even if the loop exited due to audioRecord error.
+                // This ensures no speech is lost when recording stops.
+                Log.d(TAG, "audio loop ended, flushing VAD")
+                localVad.flush()
+                var flushed = 0
                 while (!localVad.empty()) {
                     val segment = localVad.front()
                     localVad.pop()
-                    val copied = segment.samples.copyOf()
-                    Log.d(TAG, "VAD segment: ${copied.size} samples (${copied.size * 1000 / SAMPLE_RATE}ms)")
-                    segmentCh.trySend(copied)
+                    segmentCh.trySend(segment.samples.copyOf())
+                    flushed++
                 }
+                Log.d(TAG, "VAD flushed $flushed segments")
+                segmentCh.close()
+                decoderJob.join()
+                localVad.reset()
             }
-
-            // Flush remaining VAD buffer into channel, then close
-            localVad.flush()
-            while (!localVad.empty()) {
-                val segment = localVad.front()
-                localVad.pop()
-                segmentCh.trySend(segment.samples.copyOf())
-            }
-            segmentCh.close()
-            decoderJob.join()   // wait for all queued segments to finish decoding
-            localVad.reset()
         }
     }
 

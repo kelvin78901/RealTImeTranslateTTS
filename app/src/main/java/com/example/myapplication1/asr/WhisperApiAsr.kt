@@ -192,41 +192,44 @@ class WhisperApiAsr(
     }
 
     private suspend fun CoroutineScope.runWithVad(callback: Callback) {
-        val buffer = ShortArray(512)  // match VAD window size
+        val buffer = ShortArray(512)
         val localVad = vad ?: return
 
-        while (isActive && recording) {
-            val read = audioRecord?.read(buffer, 0, buffer.size) ?: break
-            if (read <= 0) continue
+        try {
+            while (isActive && recording) {
+                val read = try {
+                    audioRecord?.read(buffer, 0, buffer.size) ?: break
+                } catch (_: Throwable) { break }
+                if (read <= 0) continue
 
-            val floatSamples = FloatArray(read) { buffer[it] / 32768.0f }
-            localVad.acceptWaveform(floatSamples)
+                val floatSamples = FloatArray(read) { buffer[it] / 32768.0f }
+                localVad.acceptWaveform(floatSamples)
 
-            if (localVad.isSpeechDetected()) {
-                withContext(Dispatchers.Main) { callback.onSpeechDetected() }
+                if (localVad.isSpeechDetected()) {
+                    withContext(Dispatchers.Main) { callback.onSpeechDetected() }
+                }
+
+                while (!localVad.empty()) {
+                    val segment = localVad.front()
+                    localVad.pop()
+                    val pcm = floatToPcm(segment.samples)
+                    launch { sendToApi(pcm, callback) }
+                }
             }
-
+        } finally {
+            // ALWAYS flush VAD — ensures no speech lost on stop
+            Log.i(TAG, "audio loop ended, flushing VAD")
+            localVad.flush()
+            val flushJobs = mutableListOf<Job>()
             while (!localVad.empty()) {
                 val segment = localVad.front()
                 localVad.pop()
-
-                // Launch API call concurrently so the audio reading loop is NOT blocked.
                 val pcm = floatToPcm(segment.samples)
-                launch { sendToApi(pcm, callback) }
+                flushJobs += launch { sendToApi(pcm, callback) }
             }
+            flushJobs.forEach { it.join() }
+            localVad.reset()
         }
-
-        // Flush remaining VAD buffer — concurrent API calls, wait for all to finish
-        localVad.flush()
-        val flushJobs = mutableListOf<Job>()
-        while (!localVad.empty()) {
-            val segment = localVad.front()
-            localVad.pop()
-            val pcm = floatToPcm(segment.samples)
-            flushJobs += launch { sendToApi(pcm, callback) }
-        }
-        flushJobs.forEach { it.join() }
-        localVad.reset()
     }
 
     /**
