@@ -57,16 +57,6 @@ class TranslationRefiner(
             "4. 【保持原意】不增添、不删减关键信息\n" +
             "5. 【格式要求】只输出最终中文段落，不加编号、引号、注释或任何额外字符"
 
-        /** Single-pass translate entire paragraph (for LLM-based translation engines). */
-        private const val PARAGRAPH_TRANSLATE_PROMPT =
-            "你是专业同声传译员（英译中）。\n" +
-            "以下是语音识别（ASR）逐句切分的英文，可能存在截断片段。\n" +
-            "请将整段内容翻译为一段连贯、自然的书面中文。\n\n" +
-            "处理规则：\n" +
-            "1. 【合并截断】识别并合并被 ASR 错误切分的句子片段\n" +
-            "2. 【准确翻译】忠实原文，符合中文表达习惯\n" +
-            "3. 【格式要求】只输出最终中文段落，不加编号、引号、注释或任何额外字符"
-
         /** Provider constants */
         const val PROVIDER_OFF = 0
         const val PROVIDER_GROQ = 1
@@ -122,13 +112,6 @@ class TranslationRefiner(
         }
     }
 
-    /** Result of per-sentence refinement (kept for backward compatibility). */
-    data class RefineResult(
-        val displayText: String,
-        val ttsText: String,
-        val mergeWithPrev: Boolean
-    )
-
     private val isLocal: Boolean = baseUrl.let {
         val lower = it.lowercase()
         lower.contains("localhost") || lower.contains("127.0.0.1") ||
@@ -182,40 +165,7 @@ class TranslationRefiner(
         }
     }
 
-    /**
-     * Single-pass: translate an entire paragraph from English to Chinese.
-     * Used when the translation engine is LLM-based to avoid separate translate + refine.
-     *
-     * @param enSentences list of English sentences in the paragraph
-     * @return polished Chinese paragraph
-     */
-    suspend fun translateParagraph(enSentences: List<String>): String {
-        if (enSentences.isEmpty()) return ""
-        val ctx = mutex.withLock { paragraphContext.toList() }
-
-        return try {
-            val userMsg = buildParagraphTranslateMsg(enSentences, ctx)
-            val result = callLlm(PARAGRAPH_TRANSLATE_PROMPT, userMsg)
-
-            if (result.isNotBlank()) {
-                val combinedEn = enSentences.joinToString(" ")
-                mutex.withLock {
-                    paragraphContext.addLast(combinedEn to result)
-                    while (paragraphContext.size > maxContextSize) paragraphContext.removeFirst()
-                }
-                result
-            } else {
-                ""
-            }
-        } catch (e: Throwable) {
-            Log.w(TAG, "Paragraph translate failed: ${e.message}")
-            ""
-        }
-    }
-
-    // ===================== Per-sentence refinement (kept for fast TTS path) =====================
-
-    /** Quick single-sentence refinement for immediate TTS. */
+    /** Quick single-sentence refinement. */
     private suspend fun refineSingle(en: String, rawZh: String): String {
         val ctx = mutex.withLock { paragraphContext.toList() }
         return try {
@@ -239,36 +189,6 @@ class TranslationRefiner(
         }
     }
 
-    /** Legacy per-sentence refine. Now simply returns non-merge result. */
-    suspend fun refine(en: String, rawZh: String): RefineResult {
-        val refined = refineSingle(en, rawZh)
-        return RefineResult(refined, refined, mergeWithPrev = false)
-    }
-
-    /** Legacy single-pass translate+refine. Returns non-merge result. */
-    suspend fun translateAndRefine(en: String): RefineResult {
-        val ctx = mutex.withLock { paragraphContext.toList() }
-        return try {
-            val sb = StringBuilder()
-            if (ctx.isNotEmpty()) {
-                sb.append("对话上下文:\n")
-                ctx.takeLast(5).forEachIndexed { i, (e, z) ->
-                    sb.append("${i + 1}. $e → $z\n")
-                }
-                sb.append("\n")
-            }
-            sb.append("翻译: $en")
-            val result = callLlm(
-                "你是专业同声传译员。将英文翻译为地道的中文。只输出翻译结果。",
-                sb.toString()
-            )
-            val zh = if (result.isBlank()) en else result
-            RefineResult(zh, zh, mergeWithPrev = false)
-        } catch (e: Throwable) {
-            RefineResult(en, en, mergeWithPrev = false)
-        }
-    }
-
     suspend fun clearContext() {
         mutex.withLock { paragraphContext.clear() }
     }
@@ -289,24 +209,6 @@ class TranslationRefiner(
         sb.append("当前段落（需要整合润色）:\n")
         segments.forEachIndexed { i, (en, zh) ->
             sb.append("${i + 1}. \"$en\" → \"$zh\"\n")
-        }
-        return sb.toString()
-    }
-
-    private fun buildParagraphTranslateMsg(
-        enSentences: List<String>,
-        ctx: List<Pair<String, String>>
-    ): String {
-        val sb = StringBuilder()
-        if (ctx.isNotEmpty()) {
-            sb.append("前文（供参考上下文）:\n")
-            ctx.takeLast(3).forEach { (e, z) ->
-                sb.append("$e\n→ $z\n\n")
-            }
-        }
-        sb.append("当前段落（需要翻译）:\n")
-        enSentences.forEachIndexed { i, en ->
-            sb.append("${i + 1}. \"$en\"\n")
         }
         return sb.toString()
     }

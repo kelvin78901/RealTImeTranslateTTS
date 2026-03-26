@@ -94,11 +94,6 @@ class MainActivity : ComponentActivity() {
         val allDone: Boolean get() = segments.isNotEmpty() && segments.none { it.translating }
     }
 
-    companion object {
-        /** Sentinel seqId for synthetic segments created by paragraph refinement. */
-        private const val REFINED_SEGMENT_ID = -1
-    }
-
     private val _paragraphs = mutableStateListOf<Paragraph>()
     private var _nextParagraphId = 0
     private var _currentPartial by mutableStateOf("")
