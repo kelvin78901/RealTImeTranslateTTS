@@ -1133,37 +1133,36 @@ class MainActivity : ComponentActivity() {
         override fun onTranslationStarted(seqId: Int, en: String) {}
 
         override fun onTranslationResult(seqId: Int, en: String, zh: String) {
-            runOnUiThread {
-                // Find paragraph+segment by seqId (unique, handles duplicate English text)
-                for (pi in _paragraphs.indices) {
-                    val para = _paragraphs[pi]
-                    val si = para.segments.indexOfFirst { it.seqId == seqId }
-                    if (si >= 0) {
-                        val newSegs = para.segments.toMutableList()
-                        newSegs[si] = newSegs[si].copy(zh = zh, translating = false)
-                        _paragraphs[pi] = para.copy(segments = newSegs)
-                        log("$en → $zh")
-                        translationHistory.updateLastZh(en, zh)
-                        _historySessions.clear()
-                        _historySessions.addAll(translationHistory.allSessions())
-                        return@runOnUiThread
-                    }
+            // Already on Main thread (pipeline uses withContext(Dispatchers.Main))
+            for (pi in _paragraphs.indices) {
+                val para = _paragraphs[pi]
+                val si = para.segments.indexOfFirst { it.seqId == seqId }
+                if (si >= 0) {
+                    val newSegs = para.segments.toMutableList()
+                    newSegs[si] = newSegs[si].copy(zh = zh, translating = false)
+                    _paragraphs[pi] = para.copy(segments = newSegs)
+                    log("$en → $zh")
+                    translationHistory.updateLastZh(en, zh)
+                    _historySessions.clear()
+                    _historySessions.addAll(translationHistory.allSessions())
+                    return
                 }
             }
+            // Segment not found — translation result arrived but no matching UI segment.
+            // This can happen if clearAll() was called. Log and discard.
+            Log.w("VRI", "Translation result for seqId=$seqId not found in paragraphs")
         }
 
         override fun onTranslationError(seqId: Int, en: String, error: String) {
-            runOnUiThread {
-                for (pi in _paragraphs.indices) {
-                    val para = _paragraphs[pi]
-                    val si = para.segments.indexOfFirst { it.seqId == seqId }
-                    if (si >= 0) {
-                        val newSegs = para.segments.toMutableList()
-                        newSegs[si] = newSegs[si].copy(zh = "[翻译失败]", translating = false)
-                        _paragraphs[pi] = para.copy(segments = newSegs)
-                        log("翻译失败: $error")
-                        return@runOnUiThread
-                    }
+            for (pi in _paragraphs.indices) {
+                val para = _paragraphs[pi]
+                val si = para.segments.indexOfFirst { it.seqId == seqId }
+                if (si >= 0) {
+                    val newSegs = para.segments.toMutableList()
+                    newSegs[si] = newSegs[si].copy(zh = "[翻译失败]", translating = false)
+                    _paragraphs[pi] = para.copy(segments = newSegs)
+                    log("翻译失败: $error")
+                    return
                 }
             }
         }
@@ -1179,19 +1178,15 @@ class MainActivity : ComponentActivity() {
         }
 
         override fun onParagraphRefined(paragraphId: Int, refinedZh: String) {
-            runOnUiThread {
-                val pi = _paragraphs.indexOfFirst { it.id == paragraphId }
-                if (pi >= 0) {
-                    val current = _paragraphs[pi]
-                    // Record how many segments existed when refinement was done
-                    // so displayZh can fall back to rawZh if new segments arrive later
-                    _paragraphs[pi] = current.copy(
-                        refinedZh = refinedZh,
-                        refining = false,
-                        refinedAtCount = current.segments.size
-                    )
-                    log("段落润色完成 (${current.segments.size}句)")
-                }
+            val pi = _paragraphs.indexOfFirst { it.id == paragraphId }
+            if (pi >= 0) {
+                val current = _paragraphs[pi]
+                _paragraphs[pi] = current.copy(
+                    refinedZh = refinedZh,
+                    refining = false,
+                    refinedAtCount = current.segments.size
+                )
+                log("段落润色完成 (${current.segments.size}句)")
             }
         }
     }
