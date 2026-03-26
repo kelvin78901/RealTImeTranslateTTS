@@ -338,11 +338,37 @@ class SherpaWhisperAsr(private val context: Context) {
                 while (!localVad.empty()) {
                     val segment = localVad.front()
                     localVad.pop()
+                    val samples = segment.samples.copyOf()
 
-                    withContext(Dispatchers.Main) { callback.onProcessing() }
+                    // Decode in a separate coroutine so the audio loop keeps reading.
+                    // Without this, decode (2-10s for larger models) blocks audioRecord.read
+                    // and the user sees nothing until decode finishes.
+                    launch(Dispatchers.IO) {
+                        val stream = localRecognizer.createStream()
+                        stream.acceptWaveform(samples, SAMPLE_RATE)
+                        localRecognizer.decode(stream)
+                        val result = localRecognizer.getResult(stream)
+                        stream.release()
 
+                        val text = result.text.trim()
+                        if (text.isNotBlank()) {
+                            withContext(Dispatchers.Main) { callback.onResult(text) }
+                        }
+                    }
+                }
+            }
+
+            // Flush remaining
+            localVad.flush()
+            val flushJobs = mutableListOf<Job>()
+            while (!localVad.empty()) {
+                val segment = localVad.front()
+                localVad.pop()
+                val samples = segment.samples.copyOf()
+
+                flushJobs += launch(Dispatchers.IO) {
                     val stream = localRecognizer.createStream()
-                    stream.acceptWaveform(segment.samples, SAMPLE_RATE)
+                    stream.acceptWaveform(samples, SAMPLE_RATE)
                     localRecognizer.decode(stream)
                     val result = localRecognizer.getResult(stream)
                     stream.release()
@@ -351,28 +377,9 @@ class SherpaWhisperAsr(private val context: Context) {
                     if (text.isNotBlank()) {
                         withContext(Dispatchers.Main) { callback.onResult(text) }
                     }
-                    withContext(Dispatchers.Main) { callback.onListening() }
                 }
             }
-
-            // Flush remaining
-            localVad.flush()
-            while (!localVad.empty()) {
-                val segment = localVad.front()
-                localVad.pop()
-                withContext(Dispatchers.Main) { callback.onProcessing() }
-
-                val stream = localRecognizer.createStream()
-                stream.acceptWaveform(segment.samples, SAMPLE_RATE)
-                localRecognizer.decode(stream)
-                val result = localRecognizer.getResult(stream)
-                stream.release()
-
-                val text = result.text.trim()
-                if (text.isNotBlank()) {
-                    withContext(Dispatchers.Main) { callback.onResult(text) }
-                }
-            }
+            flushJobs.forEach { it.join() }
         }
     }
 
