@@ -825,26 +825,24 @@ class MainActivity : ComponentActivity() {
     private fun startWhisperApi(provider: WhisperApiAsr.Provider, key: String) {
         if (key.isBlank()) { log("请设置 ${provider.name} API Key"); return }
         whisperAsr?.close(); whisperAsr = WhisperApiAsr(this, key, provider)
-        _recording = true; log("开始录音 (${provider.name})")
+        _recording = true
 
-        // Ensure Silero VAD model is available; download in background if missing
-        if (!WhisperApiAsr.isVadAvailable(this)) {
-            log("正在下载语音检测模型…")
-            _currentPartial = "下载语音检测模型…"
+        // Start ASR IMMEDIATELY — don't wait for VAD download
+        whisperAsr?.start(lifecycleScope, whisperCb)
+
+        val vadAvailable = WhisperApiAsr.isVadAvailable(this)
+        if (vadAvailable) {
+            log("开始录音 (${provider.name} + Silero VAD)")
+        } else {
+            log("开始录音 (${provider.name} · 简易VAD · 正在下载Silero…)")
+            // Download VAD in background — next recording session will use it
             lifecycleScope.launch(Dispatchers.IO) {
-                val vadFile = WhisperApiAsr.ensureVadDownloaded(this@MainActivity)
+                val f = WhisperApiAsr.ensureVadDownloaded(this@MainActivity)
                 withContext(Dispatchers.Main) {
-                    if (vadFile != null) {
-                        log("语音检测模型就绪")
-                    } else {
-                        log("语音检测模型下载失败，使用简易检测")
-                    }
-                    // Start ASR (will use Silero VAD if downloaded, energy fallback otherwise)
-                    whisperAsr?.start(lifecycleScope, whisperCb)
+                    if (f != null) log("Silero VAD 已下载，下次录音生效")
+                    else log("Silero VAD 下载失败")
                 }
             }
-        } else {
-            whisperAsr?.start(lifecycleScope, whisperCb)
         }
     }
 
