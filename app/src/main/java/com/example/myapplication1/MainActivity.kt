@@ -976,10 +976,15 @@ class MainActivity : ComponentActivity() {
      * No re-segmentation.  Paragraph breaks are detected by silence gaps.
      */
     private fun onAsrResult(text: String) {
-        // TTS echo suppression — dynamic grace based on last TTS output length
-        if (_isTtsSpeaking || System.currentTimeMillis() - _ttsSpeakEndTime < ttsEchoGraceMs()) {
-            Log.d("MainActivity", "ASR result suppressed during TTS: ${text.take(30)}")
-            return
+        // TTS echo suppression — only while actively recording (mic is live).
+        // After recording stops, the flush processes pre-recorded audio from VAD buffer,
+        // so there's no echo to suppress. Without this check, flush results get dropped
+        // when TTS is playing a previous translation.
+        if (_recording) {
+            if (_isTtsSpeaking || System.currentTimeMillis() - _ttsSpeakEndTime < ttsEchoGraceMs()) {
+                Log.d("MainActivity", "ASR result suppressed during TTS: ${text.take(30)}")
+                return
+            }
         }
 
         // Smart filter

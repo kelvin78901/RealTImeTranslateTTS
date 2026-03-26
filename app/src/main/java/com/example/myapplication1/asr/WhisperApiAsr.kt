@@ -210,23 +210,31 @@ class WhisperApiAsr(
                 val segment = localVad.front()
                 localVad.pop()
 
-                // Convert float samples to PCM bytes
+                // Launch API call concurrently so the audio reading loop is NOT blocked.
+                // This allows the VAD to keep processing audio while the API is working,
+                // enabling sentence-by-sentence results instead of batch-after-silence.
                 val pcm = floatToPcm(segment.samples)
-                withContext(Dispatchers.Main) { callback.onProcessing() }
-                sendToApi(pcm, callback)
-                withContext(Dispatchers.Main) { callback.onListening() }
+                launch {
+                    withContext(Dispatchers.Main) { callback.onProcessing() }
+                    sendToApi(pcm, callback)
+                    withContext(Dispatchers.Main) { callback.onListening() }
+                }
             }
         }
 
-        // Flush remaining
+        // Flush remaining VAD buffer — also concurrent
         localVad.flush()
+        val flushJobs = mutableListOf<Job>()
         while (!localVad.empty()) {
             val segment = localVad.front()
             localVad.pop()
             val pcm = floatToPcm(segment.samples)
-            withContext(Dispatchers.Main) { callback.onProcessing() }
-            sendToApi(pcm, callback)
+            flushJobs += launch {
+                withContext(Dispatchers.Main) { callback.onProcessing() }
+                sendToApi(pcm, callback)
+            }
         }
+        flushJobs.forEach { it.join() }  // wait for all flush API calls to finish
         localVad.reset()
     }
 
