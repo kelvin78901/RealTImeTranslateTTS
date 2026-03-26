@@ -86,16 +86,10 @@ class MainActivity : ComponentActivity() {
     data class Segment(val seqId: Int = -1, val en: String, val zh: String = "", val translating: Boolean = true)
     data class Paragraph(
         val id: Int,
-        val segments: List<Segment> = emptyList(),
-        val refinedZh: String = "",
-        val refining: Boolean = false,
-        val refinedAtCount: Int = 0   // segment count when refinement was done
+        val segments: List<Segment> = emptyList()
     ) {
         val combinedEn: String get() = segments.joinToString(" ") { it.en }
         val rawZh: String get() = segments.filter { it.zh.isNotBlank() }.joinToString("") { it.zh }
-        /** Show refined text only if no new segments arrived after refinement. */
-        val displayZh: String get() =
-            if (refinedZh.isNotBlank() && segments.size == refinedAtCount) refinedZh else rawZh
         val anyTranslating: Boolean get() = segments.any { it.translating }
         val allDone: Boolean get() = segments.isNotEmpty() && segments.none { it.translating }
     }
@@ -143,8 +137,6 @@ class MainActivity : ComponentActivity() {
     private var _mediaCaptureError by mutableStateOf("")
 
     // ---- 段落管理 ----
-    private var paragraphGapJob: Job? = null       // fires when speaker pauses → close paragraph
-    private val PARAGRAPH_GAP_MS = 4000L           // 4s silence = new paragraph
 
     // ---- 翻译引擎缓存 ----
     private var cachedTransEngine: TranslationEngine? = null
@@ -488,83 +480,25 @@ class MainActivity : ComponentActivity() {
 
     private fun startTtsConsumer() {
         ttsConsumerJob = lifecycleScope.launch {
-            var prefetchedFile: java.io.File? = null
-            var pendingText: String? = null
-
             while (true) {
-                val text = if (pendingText != null) {
-                    pendingText.also { pendingText = null }
-                } else {
-                    ttsQueue.receiveCatching().getOrNull() ?: break
-                }
-
+                val text = ttsQueue.receiveCatching().getOrNull() ?: break
                 _ttsQueueSize = ttsPendingCount.get()
                 if (_autoSpeak) {
                     val ttsStart = System.currentTimeMillis()
-                    // Wrap ALL TTS playback in try/catch — a single failure must NOT
-                    // kill the consumer coroutine, otherwise all future auto-TTS stops.
                     try {
-                        if (_ttsEngine == 0) {
-                            val v = EdgeTts.ZH_VOICES.getOrNull(_edgeVoiceIdx)?.first ?: "zh-CN-XiaoxiaoNeural"
-                            val rate = dynamicEdgeRate()
-
-                            if (prefetchedFile != null) {
-                                val audioFile = prefetchedFile!!
-                                prefetchedFile = null
-                                val prefetchJob = launch {
-                                    try {
-                                        val next = ttsQueue.tryReceive().getOrNull()
-                                        if (next != null) {
-                                            pendingText = next
-                                            prefetchedFile = edgeTts.synthesizeToFile(next, voice = v, rate = rate)
-                                        }
-                                    } catch (_: Throwable) {}
-                                }
-                                _isTtsSpeaking = true
-                                try {
-                                    edgeTts.playFile(audioFile)
-                                } finally {
-                                    _isTtsSpeaking = false
-                                    _ttsSpeakEndTime = System.currentTimeMillis()
-                                }
-                                audioFile.delete()
-                                prefetchJob.join()
-                            } else {
-                                val prefetchJob = launch {
-                                    try {
-                                        val next = ttsQueue.tryReceive().getOrNull()
-                                        if (next != null) {
-                                            pendingText = next
-                                            prefetchedFile = edgeTts.synthesizeToFile(next, voice = v, rate = rate)
-                                        }
-                                    } catch (_: Throwable) {}
-                                }
-                                _isTtsSpeaking = true
-                                try {
-                                    edgeTts.synthesizeAndPlay(text, voice = v, rate = rate)
-                                } finally {
-                                    _isTtsSpeaking = false
-                                    _ttsSpeakEndTime = System.currentTimeMillis()
-                                }
-                                prefetchJob.join()
-                            }
-                        } else {
-                            speakZh(text)
-                        }
+                        // Use the SAME speakZh path for all engines (auto + manual).
+                        // This ensures consistent behavior and fallback on failure.
+                        speakZh(text)
                         _ttsLatencyMs = System.currentTimeMillis() - ttsStart
                     } catch (e: Throwable) {
-                        // TTS failed for this sentence — log and continue to next
-                        Log.e("VRI", "TTS playback error: ${e.message}")
+                        Log.e("VRI", "TTS error: ${e.message}")
                         _isTtsSpeaking = false
                         _ttsSpeakEndTime = System.currentTimeMillis()
-                        // Discard broken prefetch state
-                        prefetchedFile?.delete(); prefetchedFile = null; pendingText = null
                     }
                 }
                 ttsPendingCount.decrementAndGet()
                 _ttsQueueSize = ttsPendingCount.get()
             }
-            prefetchedFile?.delete()
         }
     }
 
@@ -661,7 +595,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private suspend fun speakGoogle(text: String) {
-        try { googleTts.speak(text, "zh-CN") } catch (e: Throwable) { log("TTS: ${e.message}") }
+        val speed = dynamicSystemRate() // reuse dynamic speed based on queue depth
+        try { googleTts.speak(text, "zh-CN", speed) } catch (e: Throwable) { log("TTS: ${e.message}") }
     }
 
     private suspend fun speakOpenAi(text: String) {
@@ -701,22 +636,13 @@ class MainActivity : ComponentActivity() {
     private fun stopAllAsr() {
         if (!_recording) return
         _recording = false
-        paragraphGapJob?.cancel()
         log("停止录音")
 
-        val lastParaId = _paragraphs.lastOrNull()?.id
-
-        // Stop ASR — graceful flush for remaining buffered audio
         when (_asrEngine) {
             0 -> stopSystemAsr()
             1 -> { stopVosk(); flushVosk() }
             2, 3, 5 -> whisperAsr?.stopGracefully()
             4 -> sherpaWhisperAsr.stopGracefully()
-        }
-
-        // Trigger paragraph refinement in background (non-blocking)
-        if (lastParaId != null) {
-            closeParagraphById(lastParaId)
         }
 
         _currentPartial = ""
@@ -942,7 +868,7 @@ class MainActivity : ComponentActivity() {
         _mediaCaptureStatus = ""
         _mediaSourceApp = ""
         // Close any active paragraph on media capture stop
-        _paragraphs.lastOrNull()?.id?.let { closeParagraphById(it) }
+        // media capture stopped
         log("媒体捕获已停止")
     }
 
@@ -1003,8 +929,6 @@ class MainActivity : ComponentActivity() {
      * No re-segmentation.  Paragraph breaks are detected by silence gaps.
      */
     private fun onAsrResult(text: String) {
-        paragraphGapJob?.cancel()
-
         // TTS echo suppression
         if (_isTtsSpeaking || System.currentTimeMillis() - _ttsSpeakEndTime < TTS_ECHO_GRACE_MS) {
             Log.d("MainActivity", "ASR result suppressed during TTS: ${text.take(30)}")
@@ -1029,53 +953,26 @@ class MainActivity : ComponentActivity() {
     private fun addSegmentToParagraph(text: String) {
         _currentPartial = ""
 
-        // Ensure current paragraph exists
-        if (_paragraphs.isEmpty() || _paragraphs.last().let {
-                it.refinedZh.isNotBlank() || (!it.anyTranslating && it.allDone && it.segments.size >= 8)
-            }) {
+        // Start new paragraph if needed (previous full or empty list)
+        if (_paragraphs.isEmpty() || (_paragraphs.last().allDone && _paragraphs.last().segments.size >= 8)) {
             _paragraphs.add(Paragraph(id = _nextParagraphId++))
         }
 
         val paraIdx = _paragraphs.lastIndex
         val para = _paragraphs[paraIdx]
-        val paraId = para.id
 
         // 1. Allocate seqId
         val seqId = translationPipeline.allocateSeqId()
 
-        // 2. Update UI state FIRST — English text visible immediately
+        // 2. Update UI FIRST — English text visible immediately
         val newSeg = Segment(seqId = seqId, en = text, translating = true)
         _paragraphs[paraIdx] = para.copy(segments = para.segments + newSeg)
 
-        // 3. THEN start translation (callback will find the segment)
-        translationPipeline.submitSentence(seqId, paraId, text)
+        // 3. Start translation (callback will find the segment and update Chinese)
+        translationPipeline.submitSentence(seqId, para.id, text)
 
-        // History
+        // 4. History
         translationHistory.append(text, "")
-
-        // Paragraph gap timer
-        paragraphGapJob?.cancel()
-        paragraphGapJob = lifecycleScope.launch {
-            delay(PARAGRAPH_GAP_MS)
-            closeParagraphById(paraId)
-        }
-    }
-
-    /** Close a paragraph by its stable ID: trigger Stage 2 refinement in background. */
-    private fun closeParagraphById(paragraphId: Int) {
-        val pi = _paragraphs.indexOfFirst { it.id == paragraphId }
-        if (pi < 0) return
-        val para = _paragraphs[pi]
-        if (para.segments.isEmpty()) return
-        // Don't re-trigger if already refining or already refined with same segment count
-        if (para.refining) return
-        if (para.refinedZh.isNotBlank() && para.refinedAtCount == para.segments.size) return
-
-        // Only set refining=true if refiner is actually configured
-        if (_refineProvider != TranslationRefiner.PROVIDER_OFF) {
-            _paragraphs[pi] = para.copy(refining = true)
-        }
-        translationPipeline.closeParagraph(paragraphId)
     }
 
     // ===================== Translation Engine =====================
@@ -1193,17 +1090,7 @@ class MainActivity : ComponentActivity() {
         }
 
         override fun onParagraphRefined(paragraphId: Int, refinedZh: String) {
-            val pi = _paragraphs.indexOfFirst { it.id == paragraphId }
-            if (pi >= 0) {
-                val current = _paragraphs[pi]
-                // Always clear refining flag. Only set refinedZh if non-empty.
-                _paragraphs[pi] = current.copy(
-                    refinedZh = if (refinedZh.isNotBlank()) refinedZh else current.refinedZh,
-                    refining = false,
-                    refinedAtCount = if (refinedZh.isNotBlank()) current.segments.size else current.refinedAtCount
-                )
-                if (refinedZh.isNotBlank()) log("段落润色完成 (${current.segments.size}句)")
-            }
+            // Paragraph refinement disabled — per-sentence display only
         }
     }
 
@@ -1215,7 +1102,6 @@ class MainActivity : ComponentActivity() {
         for (n in assets.list(a) ?: emptyArray()) { val p = "$a/$n"; val c = assets.list(p); if (c.isNullOrEmpty()) assets.open(p).use { i -> FileOutputStream(File(d, n)).use { o -> i.copyTo(o) } } else copyAssetDir(p, File(d, n)) }
     }
     private fun clearAll() {
-        paragraphGapJob?.cancel()
         _paragraphs.clear(); _nextParagraphId = 0; _currentPartial = ""
         if (::translationPipeline.isInitialized) translationPipeline.reset()
         log("已清空")
@@ -2591,8 +2477,8 @@ class MainActivity : ComponentActivity() {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                 Spacer(Modifier.height(6.dp))
 
-                // Chinese: always show whatever is available (rawZh grows in real time)
-                val zh = para.displayZh
+                // Chinese: show per-sentence translations as they arrive
+                val zh = para.rawZh
                 if (zh.isNotBlank()) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text(zh, fontSize = 17.sp, fontWeight = FontWeight.Medium, lineHeight = 24.sp,
@@ -2605,7 +2491,6 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 } else if (para.anyTranslating) {
-                    // No Chinese yet but translation in progress — show spinner inline
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(8.dp))
@@ -2613,22 +2498,12 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Status row: show progress or refinement state
+                // Status: translation progress
                 if (zh.isNotBlank() && para.anyTranslating) {
                     Spacer(Modifier.height(4.dp))
                     val done = para.segments.count { !it.translating }
                     Text("翻译中 ($done/${para.segments.size})", fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
-                } else if (para.refining) {
-                    Spacer(Modifier.height(4.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(10.dp), strokeWidth = 1.5.dp)
-                        Spacer(Modifier.width(4.dp))
-                        Text("润色中…", fontSize = 10.sp, color = MaterialTheme.colorScheme.tertiary)
-                    }
-                } else if (para.refinedZh.isNotBlank() && para.segments.size == para.refinedAtCount) {
-                    Spacer(Modifier.height(2.dp))
-                    Text("✦ AI", fontSize = 9.sp, color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.4f))
                 }
             }
         }

@@ -23,15 +23,15 @@ class GoogleTranslateTts : AutoCloseable {
     @Volatile
     private var currentPlayer: MediaPlayer? = null
 
-    suspend fun speak(text: String, lang: String = "zh-CN") {
+    suspend fun speak(text: String, lang: String = "zh-CN", speed: Float = 1.0f) {
         if (text.isBlank()) return
         val chunks = splitText(text, MAX_CHUNK_LEN)
         for (chunk in chunks) {
-            playChunk(chunk, lang)
+            playChunk(chunk, lang, speed)
         }
     }
 
-    private suspend fun playChunk(text: String, lang: String) {
+    private suspend fun playChunk(text: String, lang: String, speed: Float) {
         stop()
         val encoded = withContext(Dispatchers.IO) {
             URLEncoder.encode(text, "UTF-8")
@@ -50,7 +50,13 @@ class GoogleTranslateTts : AutoCloseable {
                             .build()
                     )
                     mp.setDataSource(url)
-                    mp.setOnPreparedListener { it.start() }
+                    mp.setOnPreparedListener {
+                        // Apply dynamic playback speed
+                        if (speed != 1.0f) {
+                            try { it.playbackParams = it.playbackParams.setSpeed(speed) } catch (_: Throwable) {}
+                        }
+                        it.start()
+                    }
                     mp.setOnCompletionListener {
                         it.release()
                         if (currentPlayer === it) currentPlayer = null
