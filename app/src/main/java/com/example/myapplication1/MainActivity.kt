@@ -976,13 +976,15 @@ class MainActivity : ComponentActivity() {
      * No re-segmentation.  Paragraph breaks are detected by silence gaps.
      */
     private fun onAsrResult(text: String) {
-        // TTS echo suppression — only while actively recording (mic is live).
-        // After recording stops, the flush processes pre-recorded audio from VAD buffer,
-        // so there's no echo to suppress. Without this check, flush results get dropped
-        // when TTS is playing a previous translation.
-        if (_recording) {
-            if (_isTtsSpeaking || System.currentTimeMillis() - _ttsSpeakEndTime < ttsEchoGraceMs()) {
-                Log.d("MainActivity", "ASR result suppressed during TTS: ${text.take(30)}")
+        // Echo suppression: Hardware AEC handles the acoustic echo.  Software-level
+        // suppression only discards results that look like TTS echo (very short text
+        // arriving right after TTS ends — likely reverb picked up by the mic).
+        // We do NOT suppress during TTS playback because that blocks real duplex speech.
+        if (_recording && !_isTtsSpeaking) {
+            val msSinceTts = System.currentTimeMillis() - _ttsSpeakEndTime
+            val isLikelyEcho = msSinceTts < 400 && text.length < 6
+            if (isLikelyEcho) {
+                Log.d("MainActivity", "ASR echo suppressed: ${text.take(30)} (${msSinceTts}ms after TTS)")
                 return
             }
         }

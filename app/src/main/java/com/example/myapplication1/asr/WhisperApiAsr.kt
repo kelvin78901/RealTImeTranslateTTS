@@ -101,9 +101,9 @@ class WhisperApiAsr(
     }
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 
     interface Callback {
@@ -211,30 +211,21 @@ class WhisperApiAsr(
                 localVad.pop()
 
                 // Launch API call concurrently so the audio reading loop is NOT blocked.
-                // This allows the VAD to keep processing audio while the API is working,
-                // enabling sentence-by-sentence results instead of batch-after-silence.
                 val pcm = floatToPcm(segment.samples)
-                launch {
-                    withContext(Dispatchers.Main) { callback.onProcessing() }
-                    sendToApi(pcm, callback)
-                    withContext(Dispatchers.Main) { callback.onListening() }
-                }
+                launch { sendToApi(pcm, callback) }
             }
         }
 
-        // Flush remaining VAD buffer — also concurrent
+        // Flush remaining VAD buffer — concurrent API calls, wait for all to finish
         localVad.flush()
         val flushJobs = mutableListOf<Job>()
         while (!localVad.empty()) {
             val segment = localVad.front()
             localVad.pop()
             val pcm = floatToPcm(segment.samples)
-            flushJobs += launch {
-                withContext(Dispatchers.Main) { callback.onProcessing() }
-                sendToApi(pcm, callback)
-            }
+            flushJobs += launch { sendToApi(pcm, callback) }
         }
-        flushJobs.forEach { it.join() }  // wait for all flush API calls to finish
+        flushJobs.forEach { it.join() }
         localVad.reset()
     }
 
