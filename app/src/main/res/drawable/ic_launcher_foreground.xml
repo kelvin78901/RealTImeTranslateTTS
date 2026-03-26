@@ -1,0 +1,59 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Left speech bubble (English source) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M32,36 C32,33.2 34.2,31 37,31 L52,31 C54.8,31 57,33.2 57,36 L57,48 C57,50.8 54.8,53 52,53 L42,53 L36,58 L36,53 L37,53 C34.2,53 32,50.8 32,48 Z" />
+
+    <!-- "A" text in left bubble -->
+    <path
+        android:fillColor="#3949AB"
+        android:pathData="M41.5,37 L38,48 L40.2,48 L40.8,46 L46.2,46 L46.8,48 L49,48 L45.5,37 Z M41.5,44.2 L43.5,38.5 L45.5,44.2 Z" />
+
+    <!-- Right speech bubble (Chinese target) -->
+    <path
+        android:fillColor="#E8EAF6"
+        android:pathData="M51,49 C51,46.2 53.2,44 56,44 L71,44 C73.8,44 76,46.2 76,49 L76,61 C76,63.8 73.8,66 71,66 L72,66 L72,71 L66,66 L56,66 C53.2,66 51,63.8 51,61 Z" />
+
+    <!-- Chinese character simplification in right bubble -->
+    <path
+        android:fillColor="#3949AB"
+        android:strokeWidth="1.8"
+        android:strokeColor="#3949AB"
+        android:fillType="nonZero"
+        android:pathData="M58,51 L70,51 M64,48 L64,58 M59,55 L69,55 M60,58.5 L64,62 L68,58.5" />
+
+    <!-- Arrow between bubbles -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.85"
+        android:pathData="M48,44 L53,48 L48,52 Z" />
+
+    <!-- Sound wave arcs (left side) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeWidth="1.6"
+        android:strokeColor="#FFFFFF"
+        android:strokeAlpha="0.7"
+        android:pathData="M27,40 Q24,44 27,48" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeWidth="1.6"
+        android:strokeColor="#FFFFFF"
+        android:strokeAlpha="0.45"
+        android:pathData="M24,37 Q19,44 24,51" />
+
+    <!-- AI sparkle (top right) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.9"
+        android:pathData="M76,33 L77.5,36 L80.5,37.5 L77.5,39 L76,42 L74.5,39 L71.5,37.5 L74.5,36 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.6"
+        android:pathData="M80,28 L80.8,30 L82.8,30.8 L80.8,31.6 L80,33.6 L79.2,31.6 L77.2,30.8 L79.2,30 Z" />
+</vector>

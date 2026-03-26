@@ -1,0 +1,21 @@
+# ninja log v7
+0	11	1760491539137347935	sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-mkdir	1ae53c00422cfc4a
+0	11	1760491539137347935	/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-mkdir	1ae53c00422cfc4a
+11	1030	1760491540156961127	sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-download	d8f439fe1f266156
+11	1030	1760491540156961127	/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-download	d8f439fe1f266156
+1030	1074	1760491540157571673	sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-update	bb2cc20015688783
+1030	1074	1760491540157571673	/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-update	bb2cc20015688783
+1074	1084	1760491540210550523	sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-patch	c5649d8779123903
+1074	1084	1760491540210550523	/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-patch	c5649d8779123903
+1084	1094	1760491540220470255	sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-configure	31db5eae5ca3f1cb
+1084	1094	1760491540220470255	/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-configure	31db5eae5ca3f1cb
+1094	1104	1760491540230381987	sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-build	c39c66bf2e064549
+1094	1104	1760491540230381987	/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-build	c39c66bf2e064549
+1104	1113	1760491540240036426	sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-install	e32df31c3ef95bec
+1104	1113	1760491540240036426	/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-install	e32df31c3ef95bec
+1113	1123	1760491540249785407	sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-test	7091f85fee44250a
+1113	1123	1760491540249785407	/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-test	7091f85fee44250a
+1123	1136	1760491540262851618	CMakeFiles/sonic-git-populate-complete	4794e7fa0688ffea
+1123	1136	1760491540262851618	sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-done	4794e7fa0688ffea
+1123	1136	1760491540262851618	/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/CMakeFiles/sonic-git-populate-complete	4794e7fa0688ffea
+1123	1136	1760491540262851618	/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-done	4794e7fa0688ffea

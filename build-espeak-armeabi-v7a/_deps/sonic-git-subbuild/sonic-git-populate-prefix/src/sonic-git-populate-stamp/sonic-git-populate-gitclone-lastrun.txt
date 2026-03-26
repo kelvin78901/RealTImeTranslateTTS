@@ -1,0 +1,15 @@
+# This is a generated file and its contents are an internal implementation detail.
+# The download step will be re-executed if anything in this file changes.
+# No other meaning or use of this file is supported.
+
+method=git
+command=/opt/homebrew/bin/cmake;-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE;-P;/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/tmp/sonic-git-populate-gitclone.cmake
+source_dir=/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-src
+work_dir=/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps
+repository=https://github.com/waywardgeek/sonic.git
+remote=origin
+init_submodules=TRUE
+recurse_submodules=--recursive
+submodules=
+CMP0097=NEW
+      

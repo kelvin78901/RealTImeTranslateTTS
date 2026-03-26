@@ -1,0 +1,14 @@
+# Target labels
+ sonic-git-populate
+# Source files and their labels
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/CMakeFiles/sonic-git-populate
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/CMakeFiles/sonic-git-populate.rule
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/CMakeFiles/sonic-git-populate-complete.rule
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-build.rule
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-configure.rule
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-download.rule
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-install.rule
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-mkdir.rule
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-patch.rule
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-test.rule
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-armeabi-v7a/_deps/sonic-git-subbuild/sonic-git-populate-prefix/src/sonic-git-populate-stamp/sonic-git-populate-update.rule

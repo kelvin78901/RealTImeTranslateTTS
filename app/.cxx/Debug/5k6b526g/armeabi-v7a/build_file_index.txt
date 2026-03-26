@@ -1,0 +1,1 @@
+/Users/kelvin/AndroidStudioProjects/MyApplication12/app/src/main/cpp/CMakeLists.txt

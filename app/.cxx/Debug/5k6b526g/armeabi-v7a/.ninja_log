@@ -1,0 +1,6 @@
+# ninja log v5
+0	6	0	clean	c6cde0750ba17f4c
+0	334	1760491646994194091	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	779b0fe9102c5eec
+352	447	1760491647115146432	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/armeabi-v7a/libespeak-jni.so	5ef6a8b4f2a36858
+0	7	0	clean	c6cde0750ba17f4c
+0	23	0	clean	c6cde0750ba17f4c
