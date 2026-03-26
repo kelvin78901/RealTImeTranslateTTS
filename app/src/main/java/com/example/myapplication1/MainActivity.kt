@@ -1052,14 +1052,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Close a paragraph by its stable ID: trigger Stage 2 refinement. */
+    /** Close a paragraph by its stable ID: trigger Stage 2 refinement in background. */
     private fun closeParagraphById(paragraphId: Int) {
         val pi = _paragraphs.indexOfFirst { it.id == paragraphId }
         if (pi < 0) return
         val para = _paragraphs[pi]
-        if (para.segments.isEmpty() || para.refining || para.refinedZh.isNotBlank()) return
+        if (para.segments.isEmpty()) return
+        // Don't re-trigger if already refining or already refined with same segment count
+        if (para.refining) return
+        if (para.refinedZh.isNotBlank() && para.refinedAtCount == para.segments.size) return
 
-        _paragraphs[pi] = para.copy(refining = true)
+        // Only set refining=true if refiner is actually configured
+        if (_refineProvider != TranslationRefiner.PROVIDER_OFF) {
+            _paragraphs[pi] = para.copy(refining = true)
+        }
         translationPipeline.closeParagraph(paragraphId)
     }
 
@@ -1181,12 +1187,13 @@ class MainActivity : ComponentActivity() {
             val pi = _paragraphs.indexOfFirst { it.id == paragraphId }
             if (pi >= 0) {
                 val current = _paragraphs[pi]
+                // Always clear refining flag. Only set refinedZh if non-empty.
                 _paragraphs[pi] = current.copy(
-                    refinedZh = refinedZh,
+                    refinedZh = if (refinedZh.isNotBlank()) refinedZh else current.refinedZh,
                     refining = false,
-                    refinedAtCount = current.segments.size
+                    refinedAtCount = if (refinedZh.isNotBlank()) current.segments.size else current.refinedAtCount
                 )
-                log("段落润色完成 (${current.segments.size}句)")
+                if (refinedZh.isNotBlank()) log("段落润色完成 (${current.segments.size}句)")
             }
         }
     }

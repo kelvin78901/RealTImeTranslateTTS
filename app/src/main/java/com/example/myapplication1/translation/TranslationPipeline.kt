@@ -84,24 +84,32 @@ class TranslationPipeline(private val scope: CoroutineScope) {
     /**
      * Fire-and-forget paragraph refinement. Runs in background.
      * Only updates display text — TTS already played per-sentence.
+     * ALWAYS fires onParagraphRefined (even with empty string on failure)
+     * so the caller can clear the refining flag.
      */
     fun closeParagraph(paragraphId: Int) {
-        val ref = refiner ?: return
+        val ref = refiner
         val pairs = synchronized(paragraphData) {
             paragraphData[paragraphId]?.filter { it.second.isNotBlank() }?.toList()
         }
-        if (pairs.isNullOrEmpty()) return
+
+        // No refiner or no data → clear refining flag immediately
+        if (ref == null || pairs.isNullOrEmpty()) {
+            scope.launch(Dispatchers.Main) {
+                callback?.onParagraphRefined(paragraphId, "")
+            }
+            return
+        }
 
         scope.launch(Dispatchers.IO) {
-            try {
-                val refined = ref.refineParagraph(pairs)
-                if (refined.isNotBlank()) {
-                    withContext(Dispatchers.Main) {
-                        callback?.onParagraphRefined(paragraphId, refined)
-                    }
-                }
+            val refined = try {
+                ref.refineParagraph(pairs)
             } catch (e: Throwable) {
                 Log.w(TAG, "Refinement failed: ${e.message}")
+                ""
+            }
+            withContext(Dispatchers.Main) {
+                callback?.onParagraphRefined(paragraphId, refined)
             }
         }
     }
