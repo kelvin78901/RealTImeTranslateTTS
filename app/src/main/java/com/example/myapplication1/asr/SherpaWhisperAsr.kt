@@ -324,6 +324,32 @@ class SherpaWhisperAsr(private val context: Context) {
             val localVad = vad ?: return@launch
             val localRecognizer = recognizer ?: return@launch
 
+            // Channel for VAD segments → decode.  Decode MUST be sequential because
+            // sherpa-onnx OfflineRecognizer is NOT thread-safe.  But using a channel
+            // decouples audio reading (fast) from decode (slow) so the mic loop never stalls.
+            val segmentCh = kotlinx.coroutines.channels.Channel<FloatArray>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+
+            // Decoder coroutine: reads segments from channel, decodes one at a time
+            val decoderJob = launch(Dispatchers.IO) {
+                for (samples in segmentCh) {
+                    try {
+                        val stream = localRecognizer.createStream()
+                        stream.acceptWaveform(samples, SAMPLE_RATE)
+                        localRecognizer.decode(stream)
+                        val result = localRecognizer.getResult(stream)
+                        stream.release()
+
+                        val text = result.text.trim()
+                        if (text.isNotBlank()) {
+                            withContext(Dispatchers.Main) { callback.onResult(text) }
+                        }
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "Decode error: ${e.message}")
+                    }
+                }
+            }
+
+            // Audio loop: reads mic → feeds VAD → sends segments to channel (never blocks on decode)
             while (isActive && recording) {
                 val read = audioRecord?.read(buffer, 0, buffer.size) ?: break
                 if (read <= 0) continue
@@ -338,48 +364,20 @@ class SherpaWhisperAsr(private val context: Context) {
                 while (!localVad.empty()) {
                     val segment = localVad.front()
                     localVad.pop()
-                    val samples = segment.samples.copyOf()
-
-                    // Decode in a separate coroutine so the audio loop keeps reading.
-                    // Without this, decode (2-10s for larger models) blocks audioRecord.read
-                    // and the user sees nothing until decode finishes.
-                    launch(Dispatchers.IO) {
-                        val stream = localRecognizer.createStream()
-                        stream.acceptWaveform(samples, SAMPLE_RATE)
-                        localRecognizer.decode(stream)
-                        val result = localRecognizer.getResult(stream)
-                        stream.release()
-
-                        val text = result.text.trim()
-                        if (text.isNotBlank()) {
-                            withContext(Dispatchers.Main) { callback.onResult(text) }
-                        }
-                    }
+                    segmentCh.trySend(segment.samples.copyOf())
                 }
             }
 
-            // Flush remaining
+            // Flush remaining VAD buffer into channel, then close
             localVad.flush()
-            val flushJobs = mutableListOf<Job>()
             while (!localVad.empty()) {
                 val segment = localVad.front()
                 localVad.pop()
-                val samples = segment.samples.copyOf()
-
-                flushJobs += launch(Dispatchers.IO) {
-                    val stream = localRecognizer.createStream()
-                    stream.acceptWaveform(samples, SAMPLE_RATE)
-                    localRecognizer.decode(stream)
-                    val result = localRecognizer.getResult(stream)
-                    stream.release()
-
-                    val text = result.text.trim()
-                    if (text.isNotBlank()) {
-                        withContext(Dispatchers.Main) { callback.onResult(text) }
-                    }
-                }
+                segmentCh.trySend(segment.samples.copyOf())
             }
-            flushJobs.forEach { it.join() }
+            segmentCh.close()
+            decoderJob.join()   // wait for all queued segments to finish decoding
+            localVad.reset()
         }
     }
 
