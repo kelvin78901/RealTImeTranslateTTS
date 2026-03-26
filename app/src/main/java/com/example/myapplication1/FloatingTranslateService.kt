@@ -83,7 +83,11 @@ class FloatingTranslateService : Service() {
     private val ttsPendingCount = AtomicInteger(0)
     @Volatile private var isTtsSpeaking = false
     private var ttsSpeakEndTime = 0L
-    private val TTS_ECHO_GRACE_MS = 300L
+    @Volatile private var lastTtsLength = 0
+    private val TTS_ECHO_GRACE_BASE_MS = 200L
+    private val TTS_ECHO_GRACE_PER_CHAR_MS = 15L
+    private fun ttsEchoGraceMs(): Long =
+        TTS_ECHO_GRACE_BASE_MS + (lastTtsLength * TTS_ECHO_GRACE_PER_CHAR_MS).coerceAtMost(1500L)
 
     // Refiner
     private var translationRefiner: TranslationRefiner? = null
@@ -376,8 +380,8 @@ class FloatingTranslateService : Service() {
     }
 
     private fun onAsrResult(text: String) {
-        // TTS回声抑制
-        if (isTtsSpeaking || System.currentTimeMillis() - ttsSpeakEndTime < TTS_ECHO_GRACE_MS) return
+        // TTS回声抑制 — 动态宽限期：TTS文本越长回声越持久
+        if (isTtsSpeaking || System.currentTimeMillis() - ttsSpeakEndTime < ttsEchoGraceMs()) return
 
         if (smartFilterEnabled) {
             val filtered = AsrTextFilter.filter(text, filterConfig) ?: return
@@ -412,6 +416,7 @@ class FloatingTranslateService : Service() {
             ttsQueue.trySend(zh)
         }
         override fun onLatencyMeasured(translationMs: Long) {}
+        override fun onCacheHit(seqId: Int) {}
         override fun onParagraphRefined(paragraphId: Int, refinedZh: String) {
             updateTranslation("→ $refinedZh")
         }
@@ -446,6 +451,7 @@ class FloatingTranslateService : Service() {
 
     private suspend fun speakZh(text: String) {
         isTtsSpeaking = true
+        lastTtsLength = text.length
         try { speakZhInternal(text) } finally {
             isTtsSpeaking = false
             ttsSpeakEndTime = System.currentTimeMillis()
