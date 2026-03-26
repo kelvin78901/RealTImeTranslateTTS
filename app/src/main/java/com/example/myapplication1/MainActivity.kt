@@ -1032,14 +1032,16 @@ class MainActivity : ComponentActivity() {
         val currentParaId = para.id
         paragraphSilenceJob = lifecycleScope.launch {
             delay(PARAGRAPH_SILENCE_MS)
-            // Silence elapsed — start a fresh paragraph on the next utterance
-            // so this paragraph's context is clean for future ASR results.
-            // We also trigger refinement for the completed paragraph.
             if (_paragraphs.isNotEmpty()) {
                 val lastPara = _paragraphs.last()
                 if (lastPara.id == currentParaId && lastPara.segments.isNotEmpty()) {
-                    translationPipeline.closeParagraph(currentParaId)
-                    // Add new empty paragraph as the next container
+                    // Only trigger refinement if ALL segments are done translating.
+                    // Otherwise refinement would run on incomplete data and
+                    // could race with in-flight translation callbacks.
+                    if (lastPara.allDone) {
+                        translationPipeline.closeParagraph(currentParaId)
+                    }
+                    // Start fresh paragraph for next utterance regardless
                     _paragraphs.add(Paragraph(id = _nextParagraphId++))
                 }
             }
@@ -1167,17 +1169,12 @@ class MainActivity : ComponentActivity() {
         }
 
         override fun onParagraphRefined(paragraphId: Int, refinedZh: String) {
-            if (refinedZh.isBlank()) return
-            // Update the matching paragraph's display text with the refined version
-            for (pi in _paragraphs.indices) {
-                val para = _paragraphs[pi]
-                if (para.id == paragraphId) {
-                    // Replace combined display with refined text as a single synthetic segment
-                    val refinedSeg = Segment(seqId = REFINED_SEGMENT_ID, en = para.combinedEn, zh = refinedZh, translating = false)
-                    _paragraphs[pi] = para.copy(segments = listOf(refinedSeg))
-                    Log.d("VRI", "Paragraph $paragraphId refined: ${refinedZh.take(60)}")
-                    return
-                }
+            // Paragraph refinement is display-only. We must NEVER destroy existing
+            // segments because translations may still be in-flight or new segments
+            // may have been added since refinement was triggered.
+            // Just log the refinement result — per-sentence rawZh is the source of truth.
+            if (refinedZh.isNotBlank()) {
+                Log.d("VRI", "Paragraph $paragraphId refined: ${refinedZh.take(80)}")
             }
         }
     }
