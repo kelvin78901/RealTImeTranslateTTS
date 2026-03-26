@@ -969,15 +969,14 @@ class MainActivity : ComponentActivity() {
      * No re-segmentation.  Paragraph breaks are detected by silence gaps.
      */
     private fun onAsrResult(text: String) {
-        // Echo suppression: Hardware AEC handles the acoustic echo.  Software-level
-        // suppression only discards results that look like TTS echo (very short text
-        // arriving right after TTS ends — likely reverb picked up by the mic).
-        // We do NOT suppress during TTS playback because that blocks real duplex speech.
+        log("ASR: $text")  // ← 关键日志：ASR结果到达
+
+        // Echo suppression
         if (_recording && !_isTtsSpeaking) {
             val msSinceTts = System.currentTimeMillis() - _ttsSpeakEndTime
             val isLikelyEcho = msSinceTts < 400 && text.length < 6
             if (isLikelyEcho) {
-                Log.d("MainActivity", "ASR echo suppressed: ${text.take(30)} (${msSinceTts}ms after TTS)")
+                log("ASR回声抑制: ${text.take(30)}")
                 return
             }
         }
@@ -985,7 +984,11 @@ class MainActivity : ComponentActivity() {
         // Smart filter
         if (_smartFilterEnabled) {
             val config = AsrTextFilter.FilterConfig(_filterFillers, _filterEcho, _filterNoise, _filterMusic)
-            val filtered = AsrTextFilter.filter(text, config) ?: return
+            val filtered = AsrTextFilter.filter(text, config)
+            if (filtered == null) {
+                log("ASR过滤: ${text.take(30)}")
+                return
+            }
             AsrTextFilter.recordText(filtered)
             addSegmentToParagraph(filtered)
         } else {
@@ -1003,26 +1006,19 @@ class MainActivity : ComponentActivity() {
      */
     private fun addSegmentToParagraph(text: String) {
         _currentPartial = ""
-
-        // Cancel any pending silence-based paragraph break
         paragraphSilenceJob?.cancel()
 
-        // Start new paragraph if needed (previous full or empty list)
         if (_paragraphs.isEmpty() || (_paragraphs.last().allDone && _paragraphs.last().segments.size >= 8)) {
             _paragraphs.add(Paragraph(id = _nextParagraphId++))
         }
 
         val paraIdx = _paragraphs.lastIndex
         val para = _paragraphs[paraIdx]
-
-        // 1. Allocate seqId
         val seqId = translationPipeline.allocateSeqId()
-
-        // 2. Update UI FIRST — English text visible immediately
         val newSeg = Segment(seqId = seqId, en = text, translating = true)
         _paragraphs[paraIdx] = para.copy(segments = para.segments + newSeg)
 
-        // 3. Start translation (callback will find the segment and update Chinese)
+        log("提交翻译 seq=$seqId: ${text.take(40)}")  // ← 关键日志
         translationPipeline.submitSentence(seqId, para.id, text)
 
         // 4. History

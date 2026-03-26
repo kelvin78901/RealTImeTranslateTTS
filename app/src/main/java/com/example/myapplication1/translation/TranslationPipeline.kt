@@ -129,6 +129,7 @@ class TranslationPipeline(private val scope: CoroutineScope) {
                 }
 
                 // Fire callbacks immediately — no ordering wait
+                Log.d(TAG, "翻译完成 seq=$seqId ${ms}ms: ${en.take(30)} → ${zh.take(30)}")
                 withContext(Dispatchers.Main) {
                     callback?.onTranslationResult(seqId, en, zh)
                     callback?.onLatencyMeasured(ms)
@@ -187,7 +188,9 @@ class TranslationPipeline(private val scope: CoroutineScope) {
      * are still valid translations regardless of session context.
      */
     fun reset() {
-        callback = null
+        // NOTE: Do NOT null callback — it must survive session resets.
+        // The callback is the bridge to MainActivity's UI; nulling it
+        // causes all subsequent translations to be silently discarded.
         seqCounter.set(0)
         pendingCount.set(0)
         synchronized(paragraphData) { paragraphData.clear() }

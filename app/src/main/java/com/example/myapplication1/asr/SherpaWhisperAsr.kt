@@ -333,20 +333,25 @@ class SherpaWhisperAsr(private val context: Context) {
             val decoderJob = launch(Dispatchers.IO) {
                 for (samples in segmentCh) {
                     try {
+                        Log.d(TAG, "开始decode: ${samples.size} samples")
+                        val t0 = System.currentTimeMillis()
                         val stream = localRecognizer.createStream()
                         stream.acceptWaveform(samples, SAMPLE_RATE)
                         localRecognizer.decode(stream)
                         val result = localRecognizer.getResult(stream)
                         stream.release()
+                        val ms = System.currentTimeMillis() - t0
 
                         val text = result.text.trim()
+                        Log.d(TAG, "decode完成 ${ms}ms: [${text.take(60)}]")
                         if (text.isNotBlank()) {
                             withContext(Dispatchers.Main) { callback.onResult(text) }
                         }
                     } catch (e: Throwable) {
-                        Log.e(TAG, "Decode error: ${e.message}")
+                        Log.e(TAG, "Decode error: ${e.message}", e)
                     }
                 }
+                Log.d(TAG, "decoder coroutine ended")
             }
 
             // Audio loop: reads mic → feeds VAD → sends segments to channel (never blocks on decode)
@@ -364,7 +369,9 @@ class SherpaWhisperAsr(private val context: Context) {
                 while (!localVad.empty()) {
                     val segment = localVad.front()
                     localVad.pop()
-                    segmentCh.trySend(segment.samples.copyOf())
+                    val copied = segment.samples.copyOf()
+                    Log.d(TAG, "VAD segment: ${copied.size} samples (${copied.size * 1000 / SAMPLE_RATE}ms)")
+                    segmentCh.trySend(copied)
                 }
             }
 
