@@ -1,0 +1,11 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/cmake_install.cmake",
+		"/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/src/cmake_install.cmake",
+		"/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/src/ucd-tools/cmake_install.cmake",
+		"/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/src/speechPlayer/cmake_install.cmake",
+		"/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/src/libespeak-ng/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

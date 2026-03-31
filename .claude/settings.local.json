@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew assembleDebug:*)",
+      "Bash(JAVA_HOME=/Users/kelvin/Library/Java/JavaVirtualMachines/ms-17.0.16/Contents/Home ./gradlew assembleDebug:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(jar tf:*)",
+      "Bash(unzip:*)",
+      "Read(//private/tmp/**)",
+      "Bash(javap -p -cp sherpa-classes.jar com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig)",
+      "Bash(curl:*)",
+      "WebFetch(domain:mvnrepository.com)",
+      "Bash(cd:*)",
+      "Bash(rm:*)",
+      "Bash(JAVA_HOME=/Users/kelvin/Library/Java/JavaVirtualMachines/ms-17.0.16/Contents/Home ./gradlew clean:*)",
+      "Bash(find:*)",
+      "WebSearch",
+      "WebFetch(domain:haifengl.github.io)",
+      "WebFetch(domain:guillaume-be.github.io)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(python3:*)",
+      "Bash(JAVA_HOME=/Users/kelvin/Library/Java/JavaVirtualMachines/ms-17.0.16/Contents/Home /Users/kelvin/AndroidStudioProjects/MyApplication12/gradlew:*)",
+      "Bash(./gradlew compileDebugKotlin 2>&1 | tail -40)",
+      "Bash(./gradlew compileDebugKotlin --stacktrace 2>&1 | tail -60)",
+      "Bash(./gradlew compileDebugKotlin 2>&1 | grep -E \"error:|Error|e:|warning:\" | head -30)",
+      "Bash(./gradlew compileDebugKotlin 2>&1 | grep -v \"^WARNING:\" | grep -v \"^\\\\t\" | head -30)"
+    ]
+  }
+}

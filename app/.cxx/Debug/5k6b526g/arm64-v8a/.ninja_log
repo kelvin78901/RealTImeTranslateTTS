@@ -1,0 +1,21 @@
+# ninja log v5
+0	209	1760490926599584953	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	f1ee838199ad5b30
+210	250	1760490926639818927	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+2	38	1760491081517020808	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+2	44	1760491119885467014	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+0	4	0	clean	c6cde0750ba17f4c
+4	281	1760491646545516753	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	f1ee838199ad5b30
+281	331	1760491646592670189	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+2	43	1760491721622376448	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+1	40	1760492122726489591	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+2	48	1760942925769182258	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+2	236	1760944423758666744	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	f1ee838199ad5b30
+236	274	1760944423797301246	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+0	8	0	clean	c6cde0750ba17f4c
+1	338	1760944487200294567	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	f1ee838199ad5b30
+338	389	1760944487252248744	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+1	37	1760944520264330577	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+1	42	1760945499422666803	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+1	38	1760945526790316163	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+1	37	1760945635523939161	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/5k6b526g/obj/arm64-v8a/libespeak-jni.so	7732a14900366547
+0	9	0	clean	c6cde0750ba17f4c

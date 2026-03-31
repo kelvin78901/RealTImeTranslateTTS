@@ -1,0 +1,6 @@
+# ninja log v5
+1	618	1760949357197259735	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	f1ee838199ad5b30
+619	794	1760949357375539864	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/70355z50/obj/arm64-v8a/libespeak-jni.so	3462242d018d3df9
+0	13	0	clean	c6cde0750ba17f4c
+3	558	1760949429749206606	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	f1ee838199ad5b30
+558	724	1760949429914608145	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/70355z50/obj/arm64-v8a/libespeak-jni.so	3462242d018d3df9

@@ -1,0 +1,3 @@
+/Users/kelvin/AndroidStudioProjects/MyApplication12/app/.cxx/Debug/f1t416n5/arm64-v8a/CMakeFiles/espeak-jni.dir
+/Users/kelvin/AndroidStudioProjects/MyApplication12/app/.cxx/Debug/f1t416n5/arm64-v8a/CMakeFiles/edit_cache.dir
+/Users/kelvin/AndroidStudioProjects/MyApplication12/app/.cxx/Debug/f1t416n5/arm64-v8a/CMakeFiles/rebuild_cache.dir

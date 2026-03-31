@@ -1,0 +1,3 @@
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/CMakeFiles/sonic-git-populate.dir
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/CMakeFiles/edit_cache.dir
+/Users/kelvin/AndroidStudioProjects/MyApplication12/build-espeak-arm64-v8a/_deps/sonic-git-subbuild/CMakeFiles/rebuild_cache.dir

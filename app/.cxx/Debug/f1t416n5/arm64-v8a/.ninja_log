@@ -1,0 +1,14 @@
+# ninja log v5
+0	804	1760949692822105795	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	f1ee838199ad5b30
+805	1017	1760949693035720390	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/f1t416n5/obj/arm64-v8a/libespeak-jni.so	1fbb98c2b0959006
+2	627	1760954734625771684	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	f1ee838199ad5b30
+627	826	1760954734824678033	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/f1t416n5/obj/arm64-v8a/libespeak-jni.so	1fbb98c2b0959006
+0	9	0	clean	c6cde0750ba17f4c
+6	798	1760958122231793505	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	f1ee838199ad5b30
+798	1006	1760958122442039456	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/f1t416n5/obj/arm64-v8a/libespeak-jni.so	1fbb98c2b0959006
+0	11	0	clean	c6cde0750ba17f4c
+1	544	1760958737385183497	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	f1ee838199ad5b30
+545	718	1760958737559322994	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/f1t416n5/obj/arm64-v8a/libespeak-jni.so	1fbb98c2b0959006
+0	9	0	clean	c6cde0750ba17f4c
+3	1056	1760964326621290742	CMakeFiles/espeak-jni.dir/espeak_jni.cc.o	f1ee838199ad5b30
+1056	1339	1760964326907618286	/Users/kelvin/AndroidStudioProjects/MyApplication12/app/build/intermediates/cxx/Debug/f1t416n5/obj/arm64-v8a/libespeak-jni.so	1fbb98c2b0959006

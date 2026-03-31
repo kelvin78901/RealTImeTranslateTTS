@@ -1,0 +1,7 @@
+[
+{
+  "directory": "/Users/kelvin/AndroidStudioProjects/MyApplication12/app/.cxx/Debug/70355z50/armeabi-v7a",
+  "command": "/Users/kelvin/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=armv7-none-linux-androideabi26 --sysroot=/Users/kelvin/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Despeak_jni_EXPORTS -I/Users/kelvin/AndroidStudioProjects/MyApplication12/app/src/main/cpp/include -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -march=armv7-a -mthumb -Wformat -Werror=format-security   -fno-limit-debug-info  -fPIC -fexceptions -frtti -std=gnu++17 -o CMakeFiles/espeak-jni.dir/espeak_jni.cc.o -c /Users/kelvin/AndroidStudioProjects/MyApplication12/app/src/main/cpp/espeak_jni.cc",
+  "file": "/Users/kelvin/AndroidStudioProjects/MyApplication12/app/src/main/cpp/espeak_jni.cc"
+}
+]

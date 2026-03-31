@@ -1,0 +1,11 @@
+prefix=/Users/kelvin/Downloads/espeak-ng/build
+exec_prefix=/Users/kelvin/Downloads/espeak-ng/build
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: eSpeak NG
+Description: eSpeak NG is a multi-lingual software speech synthesizer
+Version: 1.52.0
+Requires:
+Libs: -L${libdir} -lespeak-ng
+Cflags: -I${includedir}
