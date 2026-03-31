@@ -1,8 +1,21 @@
 # RealTimeTranslateTTS
 
+> 默认语言：**中文**；（English version below）。
+
 一款 Android 实时语音翻译应用，支持麦克风录音与系统媒体音频的语音识别、翻译和语音合成（TTS）。
 
 An Android app for real-time speech recognition, translation, and text-to-speech (TTS) output — from both microphone input and system/media audio.
+
+---
+
+## 更新计划 / Upcoming Enhancements
+
+- 多语言互译体验优化（中英默认，支持更多语种双向互译）
+- 专业领域 / 场景预设输入（如会议、客服、医学、游戏等）
+- AI 助手对话：可基于当前会话历史进行追问、总结、草拟回复
+- 多语言界面切换：可选中文或英文 UI，默认中文显示
+- 对话结束后自动整理内容和大纲并上传云
+- 增加传译速率、质量和延迟水平调整的不同模式
 
 ---
 
