@@ -4,9 +4,11 @@ import android.content.Context
 import android.util.Log
 import ai.onnxruntime.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.nio.FloatBuffer
 import java.nio.LongBuffer
 import kotlin.math.exp
 import kotlin.math.ln
@@ -36,6 +38,9 @@ class OnDeviceTranslation(
 
     private var encoderSession: OrtSession? = null
     private var decoderSession: OrtSession? = null
+
+    // Limit concurrent ORT invocations to prevent native memory pressure and latency spikes
+    private val ortSemaphore = Semaphore(2)
 
     // ==================== Tokenizer models ====================
 
@@ -269,21 +274,26 @@ class OnDeviceTranslation(
     override suspend fun translate(text: String): String = withContext(Dispatchers.IO) {
         if (!initialized) throw Exception("Model not initialized" + (initError?.let { ": $it" } ?: ""))
 
-        val inputIds = tokenize(text)
-        if (inputIds.isEmpty()) throw Exception("Tokenization produced empty result")
-        Log.d(TAG, "Input tokens: ${inputIds.size} ids")
+        ortSemaphore.acquire()
+        try {
+            val inputIds = tokenize(text)
+            if (inputIds.isEmpty()) throw Exception("Tokenization produced empty result")
+            Log.d(TAG, "Input tokens: ${inputIds.size} ids")
 
-        val encoderOutput = runEncoder(inputIds)
+            val encoderOutput = runEncoder(inputIds)
 
-        val beamSize = model.defaultBeamSize
-        val outputIds = if (beamSize > 1) {
-            beamDecode(encoderOutput, inputIds.size, beamSize)
-        } else {
-            greedyDecode(encoderOutput, inputIds.size)
+            val beamSize = model.defaultBeamSize
+            val outputIds = if (beamSize > 1) {
+                beamDecode(encoderOutput, inputIds.size, beamSize)
+            } else {
+                greedyDecode(encoderOutput, inputIds.size)
+            }
+
+            Log.d(TAG, "Output tokens: ${outputIds.size} ids")
+            detokenize(outputIds)
+        } finally {
+            ortSemaphore.release()
         }
-
-        Log.d(TAG, "Output tokens: ${outputIds.size} ids")
-        detokenize(outputIds)
     }
 
     // ==================== Tokenization ====================
@@ -449,12 +459,24 @@ class OnDeviceTranslation(
         val seqLen = inputIds.size.toLong()
         val inputIdsTensor = OnnxTensor.createTensor(env, LongBuffer.wrap(inputIds), longArrayOf(1, seqLen))
         val attentionMask = OnnxTensor.createTensor(env, LongBuffer.wrap(LongArray(inputIds.size) { 1L }), longArrayOf(1, seqLen))
-        val inputs = mapOf("input_ids" to inputIdsTensor, "attention_mask" to attentionMask)
-        val result = encoderSession!!.run(inputs)
-        val output = result[0] as OnnxTensor
-        inputIdsTensor.close()
-        attentionMask.close()
-        return output
+        try {
+            val inputs = mapOf("input_ids" to inputIdsTensor, "attention_mask" to attentionMask)
+            val result = encoderSession!!.run(inputs)
+            try {
+                val outputTensor = result[0] as OnnxTensor
+                val shape = outputTensor.info.shape
+                val buf = outputTensor.floatBuffer
+                val data = FloatArray(buf.remaining())
+                buf.get(data)
+                // Return a standalone copy — the OrtSession.Result is closed immediately
+                return OnnxTensor.createTensor(env, FloatBuffer.wrap(data), shape)
+            } finally {
+                result.close()
+            }
+        } finally {
+            inputIdsTensor.close()
+            attentionMask.close()
+        }
     }
 
     // ==================== Decoder: Greedy ====================
@@ -593,29 +615,30 @@ class OnDeviceTranslation(
         val decoderInputIds = OnnxTensor.createTensor(
             env, LongBuffer.wrap(tokensSoFar.toLongArray()), longArrayOf(1, tokensSoFar.size.toLong())
         )
-        val inputs = mutableMapOf<String, OnnxTensor>()
-        inputs["input_ids"] = decoderInputIds
-        inputs[decoderEncoderOutputName] = encoderOutput
-        if (decoderAttMaskName != null) inputs[decoderAttMaskName!!] = encoderAttention
+        try {
+            val inputs = mutableMapOf<String, OnnxTensor>()
+            inputs["input_ids"] = decoderInputIds
+            inputs[decoderEncoderOutputName] = encoderOutput
+            if (decoderAttMaskName != null) inputs[decoderAttMaskName!!] = encoderAttention
 
-        val result = decoderSession!!.run(inputs)
-        val logitsTensor = result[0] as OnnxTensor
+            val result = decoderSession!!.run(inputs)
+            try {
+                val logitsTensor = result[0] as OnnxTensor
+                val logitsData = logitsTensor.floatBuffer
+                val vocabSize = logitsTensor.info.shape.last().toInt()
+                val lastPosOffset = (tokensSoFar.size - 1) * vocabSize
 
-        val logitsData = logitsTensor.floatBuffer
-        val vocabSize = logitsTensor.info.shape.last().toInt()
-        val lastPosOffset = (tokensSoFar.size - 1) * vocabSize
-
-        // Extract last-position logits into a float array
-        val lastLogits = FloatArray(vocabSize)
-        for (i in 0 until vocabSize) {
-            lastLogits[i] = logitsData.get(lastPosOffset + i)
+                val lastLogits = FloatArray(vocabSize)
+                for (i in 0 until vocabSize) {
+                    lastLogits[i] = logitsData.get(lastPosOffset + i)
+                }
+                return lastLogits
+            } finally {
+                result.close()
+            }
+        } finally {
+            decoderInputIds.close()
         }
-
-        decoderInputIds.close()
-        logitsTensor.close()
-        result.close()
-
-        return lastLogits
     }
 
     /** In-place log-softmax: logits[i] = logits[i] - log(sum(exp(logits))) */

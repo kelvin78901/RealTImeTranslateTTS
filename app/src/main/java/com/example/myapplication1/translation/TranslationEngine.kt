@@ -19,6 +19,13 @@ import kotlin.coroutines.resumeWithException
 
 abstract class TranslationEngine {
     abstract suspend fun translate(text: String): String
+
+    /**
+     * Context-aware translation. Engines that support background/glossary/latency
+     * override this; others fall back to the plain [translate].
+     */
+    open suspend fun translate(text: String, context: TranslationContext): String = translate(text)
+
     /** True if this engine uses an LLM API (can combine translation + refinement in one call). */
     open val isLlmBased: Boolean = false
     open fun close() {}
@@ -81,11 +88,15 @@ class LLMTranslation(
         }
     }
 
-    override suspend fun translate(text: String): String = withContext(Dispatchers.IO) {
+    override suspend fun translate(text: String): String = translate(text, TranslationContext())
+
+    override suspend fun translate(text: String, context: TranslationContext): String = withContext(Dispatchers.IO) {
+        val systemPrompt = buildContextPrompt(SI_SYSTEM_PROMPT, context)
+
         val json = JSONObject().apply {
             put("model", model)
             put("messages", JSONArray().apply {
-                put(JSONObject().apply { put("role", "system"); put("content", SI_SYSTEM_PROMPT) })
+                put(JSONObject().apply { put("role", "system"); put("content", systemPrompt) })
                 put(JSONObject().apply { put("role", "user"); put("content", text) })
             })
             put("temperature", 0.2)
@@ -128,12 +139,16 @@ class LocalServerTranslation(
             .build()
     }
 
-    override suspend fun translate(text: String): String = withContext(Dispatchers.IO) {
+    override suspend fun translate(text: String): String = translate(text, TranslationContext())
+
+    override suspend fun translate(text: String, context: TranslationContext): String = withContext(Dispatchers.IO) {
         val url = serverUrl.trimEnd('/') + "/chat/completions"
+        val systemPrompt = buildContextPrompt(SI_SYSTEM_PROMPT, context)
+
         val json = JSONObject().apply {
             put("model", model)
             put("messages", JSONArray().apply {
-                put(JSONObject().apply { put("role", "system"); put("content", SI_SYSTEM_PROMPT) })
+                put(JSONObject().apply { put("role", "system"); put("content", systemPrompt) })
                 put(JSONObject().apply { put("role", "user"); put("content", text) })
             })
             put("temperature", 0.2)
@@ -169,18 +184,31 @@ class DeepLTranslation(private val apiKey: String) : TranslationEngine() {
             .build()
     }
 
-    override suspend fun translate(text: String): String = withContext(Dispatchers.IO) {
+    override suspend fun translate(text: String): String = translate(text, TranslationContext())
+
+    override suspend fun translate(text: String, context: TranslationContext): String = withContext(Dispatchers.IO) {
         val base = if (apiKey.endsWith(":fx")) "https://api-free.deepl.com" else "https://api.deepl.com"
-        val formBody = FormBody.Builder()
+        val formBuilder = FormBody.Builder()
             .add("text", text)
             .add("source_lang", "EN")
             .add("target_lang", "ZH")
-            .build()
+
+        // DeepL context parameter: additional context for disambiguation (not billed)
+        if (context.background.isNotBlank()) {
+            formBuilder.add("context", context.background.take(300))
+        }
+
+        // DeepL model_type: latency_optimized or quality_optimized
+        when (context.latencyMode) {
+            LatencyMode.REALTIME -> formBuilder.add("model_type", "latency_optimized")
+            LatencyMode.QUALITY -> formBuilder.add("model_type", "quality_optimized")
+            else -> {} // balanced uses DeepL default
+        }
 
         val request = Request.Builder()
             .url("$base/v2/translate")
             .addHeader("Authorization", "DeepL-Auth-Key $apiKey")
-            .post(formBody)
+            .post(formBuilder.build())
             .build()
 
         val response = sharedClient.newCall(request).execute()
@@ -192,6 +220,31 @@ class DeepLTranslation(private val apiKey: String) : TranslationEngine() {
             .getJSONObject(0)
             .getString("text")
             .trim()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context prompt builder — shared by LLM engines
+// ---------------------------------------------------------------------------
+
+/**
+ * Augment a base system prompt with optional background context and glossary terms.
+ * Returns the original prompt unmodified if context has nothing to add.
+ */
+internal fun buildContextPrompt(base: String, context: TranslationContext): String {
+    if (context.background.isBlank() && context.glossaryTerms.isEmpty()) return base
+    return buildString {
+        append(base)
+        if (context.background.isNotBlank()) {
+            append("\n\n背景信息（仅供理解上下文，无需翻译）：")
+            append(context.background.take(300))
+        }
+        if (context.glossaryTerms.isNotEmpty()) {
+            append("\n\n参考术语（请优先使用以下译法）：")
+            context.glossaryTerms.entries.take(20).forEach { (en, zh) ->
+                append("\n- $en → $zh")
+            }
+        }
     }
 }
 

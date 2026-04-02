@@ -28,6 +28,8 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -68,6 +70,11 @@ import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Semaphore
+import com.example.myapplication1.translation.LatencyMode
+import com.example.myapplication1.translation.TranslationContext
+import com.example.myapplication1.translation.TranslationMeta
+import com.example.myapplication1.translation.GlossaryManager
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -83,13 +90,24 @@ import kotlin.math.max
 class MainActivity : ComponentActivity() {
 
     // ---- 段落模型 ----
-    data class Segment(val seqId: Int = -1, val en: String, val zh: String = "", val translating: Boolean = true)
+    data class Segment(
+        val seqId: Int = -1,
+        val en: String,
+        val zh: String = "",
+        val translating: Boolean = true,
+        /** Quality-upgraded translation (SWR). Empty if no upgrade available. */
+        val qualityZh: String = "",
+        /** Route that produced the current best translation: "fast", "quality", "fallback". */
+        val route: String = "fast"
+    )
     data class Paragraph(
         val id: Int,
         val segments: List<Segment> = emptyList()
     ) {
         val combinedEn: String get() = segments.joinToString(" ") { it.en }
-        val rawZh: String get() = segments.filter { it.zh.isNotBlank() }.joinToString("") { it.zh }
+        val rawZh: String get() = segments.filter { it.zh.isNotBlank() }.joinToString("") {
+            it.qualityZh.ifBlank { it.zh }
+        }
         val anyTranslating: Boolean get() = segments.any { it.translating }
         val allDone: Boolean get() = segments.isNotEmpty() && segments.none { it.translating }
     }
@@ -123,6 +141,14 @@ class MainActivity : ComponentActivity() {
     private var _refineProvider by mutableStateOf(0)
     private var _refineModel by mutableStateOf("llama-3.3-70b-versatile")
     private var _refineServerUrl by mutableStateOf("http://192.168.1.100:11434/v1")
+
+    // ---- 翻译上下文增强 ----
+    // 0=实时(REALTIME), 1=平衡(BALANCED), 2=质量(QUALITY)
+    private var _latencyMode by mutableStateOf(0)
+    private var _backgroundText by mutableStateOf("")
+    // "auto", "general", "meeting", "medical", "customer_support", "game"
+    private var _domainHint by mutableStateOf("auto")
+    private var _showBackgroundSheet by mutableStateOf(false)
 
     // ---- 音频设备 ----
     private var _inputDevices = mutableStateListOf<AudioDeviceInfo>()
@@ -214,6 +240,10 @@ class MainActivity : ComponentActivity() {
     private var _apiTestProgress by mutableStateOf("")
     // API Key 管理
     private var _showApiKeyManager by mutableStateOf(false)
+    // 术语库管理
+    private var _glossaryImportDomain by mutableStateOf("general")
+    private var _glossaryDownloading by mutableStateOf(false)
+    private var _glossaryImportResult by mutableStateOf("")
     private var _newKeyName by mutableStateOf("")
     private var _newKeyValue by mutableStateOf("")
 
@@ -260,6 +290,16 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private val glossaryFilePicker = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "glossary.csv"
+            val result = GlossaryManager.importUserFile(this, uri, _glossaryImportDomain, fileName)
+            _glossaryImportResult = if (result.success) "已导入 ${result.entryCount} 条术语" else result.error
+        }
+    }
+
     private val requestAudioPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { if (it) { log("麦克风权限已授予"); prepareAll() } else log("未授予麦克风权限") }
@@ -295,11 +335,14 @@ class MainActivity : ComponentActivity() {
         _historySessions.addAll(translationHistory.load())
         loadSettings()
         refreshAudioDevices()
+        // Initialize glossary system
+        GlossaryManager.init(this)
         // Initialize translation pipeline with ordered delivery
         translationPipeline = TranslationPipeline(lifecycleScope)
         translationPipeline.setCallback(pipelineCallback)
         translationPipeline.setEngine(getTranslationEngine())
         translationPipeline.setRefiner(buildRefiner())
+        updatePipelineContext()
         // Show session dialog if there are previous sessions
         if (_historySessions.isNotEmpty()) _showSessionDialog = true
         else translationHistory.newSession()
@@ -952,6 +995,9 @@ class MainActivity : ComponentActivity() {
         _refineProvider = p.getInt("refine_provider", 0)
         _refineModel = p.getString("refine_model", "llama-3.3-70b-versatile") ?: "llama-3.3-70b-versatile"
         _refineServerUrl = p.getString("refine_server_url", "http://192.168.1.100:11434/v1") ?: "http://192.168.1.100:11434/v1"
+        _latencyMode = p.getInt("latency_mode", 0)
+        _backgroundText = p.getString("background_text", "") ?: ""
+        _domainHint = p.getString("domain_hint", "auto") ?: "auto"
     }
 
     private fun saveKey(k: String, v: String) { getSharedPreferences("vri_settings", Context.MODE_PRIVATE).edit().putString(k, v).apply() }
@@ -1019,10 +1065,8 @@ class MainActivity : ComponentActivity() {
         _paragraphs[paraIdx] = para.copy(segments = para.segments + newSeg)
 
         log("提交翻译 seq=$seqId: ${text.take(40)}")  // ← 关键日志
+        translationHistory.appendPending(seqId, text)
         translationPipeline.submitSentence(seqId, para.id, text)
-
-        // 4. History
-        translationHistory.append(text, "")
 
         // 5. Schedule silence-based paragraph break
         val currentParaId = para.id
@@ -1075,9 +1119,44 @@ class MainActivity : ComponentActivity() {
         if (::translationPipeline.isInitialized) {
             translationPipeline.setEngine(getTranslationEngine())
             translationPipeline.setRefiner(buildRefiner())
-            // Clear translation cache when engine changes to avoid stale results
             translationPipeline.clearCache()
+            updatePipelineContext()
         }
+    }
+
+    /** Sync latency mode, background, domain hint, and quality engine to the pipeline. */
+    private fun updatePipelineContext() {
+        if (!::translationPipeline.isInitialized) return
+        translationPipeline.translationContext = TranslationContext(
+            background = _backgroundText,
+            domainHint = _domainHint,
+            latencyMode = when (_latencyMode) {
+                1 -> LatencyMode.BALANCED
+                2 -> LatencyMode.QUALITY
+                else -> LatencyMode.REALTIME
+            }
+        )
+        translationPipeline.setQualityEngine(buildQualityEngine())
+    }
+
+    /**
+     * Build a quality engine for SWR dual-channel translation.
+     * Picks the best available API engine that differs from the primary engine.
+     * Returns null if no suitable quality engine is available or mode is REALTIME.
+     */
+    private fun buildQualityEngine(): TranslationEngine? {
+        if (_latencyMode == 0) return null  // REALTIME — no quality path needed
+        val primary = _translationEngineType
+        // Prefer OpenAI (high quality), then DeepL, then Groq (fast), then local server
+        if (primary != 1 && _openaiKey.isNotBlank())
+            return LLMTranslation(_openaiKey)
+        if (primary != 3 && _deeplKey.isNotBlank())
+            return DeepLTranslation(_deeplKey)
+        if (primary != 2 && _groqKey.isNotBlank())
+            return LLMTranslation(_groqKey, "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile")
+        if (primary != 4 && _localServerUrl.isNotBlank())
+            return LocalServerTranslation(_localServerUrl, _localServerModel)
+        return null
     }
 
     private fun buildRefiner(): TranslationRefiner? {
@@ -1125,7 +1204,7 @@ class MainActivity : ComponentActivity() {
                     newSegs[si] = newSegs[si].copy(zh = zh, translating = false)
                     _paragraphs[pi] = para.copy(segments = newSegs)
                     log("$en → $zh")
-                    translationHistory.updateLastZh(en, zh)
+                    translationHistory.updateZhBySeqId(seqId, zh)
                     _historySessions.clear()
                     _historySessions.addAll(translationHistory.allSessions())
                     return
@@ -1165,12 +1244,27 @@ class MainActivity : ComponentActivity() {
         }
 
         override fun onParagraphRefined(paragraphId: Int, refinedZh: String) {
-            // Paragraph refinement is display-only. We must NEVER destroy existing
-            // segments because translations may still be in-flight or new segments
-            // may have been added since refinement was triggered.
-            // Just log the refinement result — per-sentence rawZh is the source of truth.
             if (refinedZh.isNotBlank()) {
                 Log.d("VRI", "Paragraph $paragraphId refined: ${refinedZh.take(80)}")
+            }
+        }
+
+        override fun onTranslationUpgraded(seqId: Int, en: String, zh: String, meta: TranslationMeta) {
+            // SWR quality upgrade — update segment display without triggering TTS
+            for (pi in _paragraphs.indices) {
+                val para = _paragraphs[pi]
+                val si = para.segments.indexOfFirst { it.seqId == seqId }
+                if (si >= 0) {
+                    val seg = para.segments[si]
+                    val newSegs = para.segments.toMutableList()
+                    newSegs[si] = seg.copy(qualityZh = zh, route = meta.route)
+                    _paragraphs[pi] = para.copy(segments = newSegs)
+                    translationHistory.upsertZhBySeqId(seqId, zh)
+                    _historySessions.clear()
+                    _historySessions.addAll(translationHistory.allSessions())
+                    log("质量升级: ${en.take(20)} → ${zh.take(20)}")
+                    return
+                }
             }
         }
     }
@@ -1417,6 +1511,183 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.padding(start = 8.dp, top = 4.dp))
                 }
 
+            }
+
+            // 3.3) 翻译增强（延迟模式、背景信息、领域词库）
+            CollapsibleSection("翻译增强", Icons.Default.Tune) {
+                Text("提升翻译准确率与术语一致性", fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                    modifier = Modifier.padding(bottom = 6.dp))
+
+                // Latency mode selector
+                Text("翻译模式", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("实时" to 0, "平衡" to 1, "质量" to 2).forEach { (label, mode) ->
+                        FilterChip(
+                            selected = _latencyMode == mode,
+                            onClick = { _latencyMode = mode; saveInt("latency_mode", mode); updatePipelineContext() },
+                            label = { Text(label, fontSize = 12.sp) }
+                        )
+                    }
+                }
+                Text(
+                    when (_latencyMode) {
+                        1 -> "先出快译，后台出优译（超时回退）"
+                        2 -> "先出快译，后台出优译（不超时）"
+                        else -> "仅快速翻译，最低延迟"
+                    },
+                    fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                )
+
+                Spacer(Modifier.height(10.dp))
+
+                // Domain selector
+                Text("领域词库", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(
+                        "auto" to "自动", "general" to "通用", "meeting" to "会议",
+                        "medical" to "医疗", "customer_support" to "客服", "game" to "游戏"
+                    ).forEach { (domain, label) ->
+                        FilterChip(
+                            selected = _domainHint == domain,
+                            onClick = { _domainHint = domain; saveKey("domain_hint", domain); updatePipelineContext() },
+                            label = { Text(label, fontSize = 12.sp) }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                // Background input
+                Text("背景信息（可选）", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                Text("帮助理解上下文，不会直接输出", fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                OutlinedTextField(
+                    _backgroundText,
+                    onValueChange = { if (it.length <= 300) { _backgroundText = it; saveKey("background_text", it); updatePipelineContext() } },
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    textStyle = LocalTextStyle.current.copy(fontSize = 12.sp),
+                    placeholder = { Text("如：这是一场医学研讨会", fontSize = 12.sp) },
+                    minLines = 2, maxLines = 4,
+                    supportingText = { Text("${_backgroundText.length}/300", fontSize = 10.sp) }
+                )
+                if (_backgroundText.isNotBlank()) {
+                    TextButton(onClick = { _backgroundText = ""; saveKey("background_text", ""); updatePipelineContext() },
+                        modifier = Modifier.align(Alignment.End)) {
+                        Text("清空", fontSize = 12.sp)
+                    }
+                }
+            }
+
+            // 3.4) 术语库管理
+            @Suppress("DEPRECATION")
+            CollapsibleSection("术语库管理", Icons.Default.LibraryBooks) {
+                Text("管理内置、下载和自定义术语库", fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                    modifier = Modifier.padding(bottom = 6.dp))
+
+                // Built-in glossaries
+                Text("内置词库", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                GlossaryManager.availableDomains.forEach { (domain, label) ->
+                    val count = GlossaryManager.getTerms(domain).size
+                    Text("  $label ($count 条)", fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                // Downloadable sources
+                Text("可下载词库", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                GlossaryManager.registrySources.forEach { source ->
+                    val downloaded = GlossaryManager.isSourceDownloaded(source.sourceId)
+                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(source.name, fontSize = 12.sp)
+                            Text("${source.license} · ${source.trustLevel}", fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                        }
+                        if (downloaded) {
+                            Text("已下载", fontSize = 10.sp, color = Color(0xFF4CAF50))
+                        } else {
+                            TextButton(
+                                onClick = {
+                                    _glossaryDownloading = true
+                                    lifecycleScope.launch {
+                                        val count = GlossaryManager.downloadSource(source.sourceId)
+                                        _glossaryDownloading = false
+                                        _glossaryImportResult = if (count > 0) "下载成功: ${count} 条" else "下载失败"
+                                    }
+                                },
+                                enabled = !_glossaryDownloading
+                            ) { Text(if (_glossaryDownloading) "下载中…" else "下载", fontSize = 11.sp) }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                // User upload
+                Text("自定义术语", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                Text("上传 CSV/TSV 文件（两列：英文,中文）", fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Domain selector for import
+                    var expanded by remember { mutableStateOf(false) }
+                    Box {
+                        OutlinedButton(onClick = { expanded = true }) {
+                            Text(GlossaryManager.getLabel(_glossaryImportDomain), fontSize = 11.sp)
+                        }
+                        DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
+                            listOf("general", "meeting", "medical", "customer_support", "game").forEach { d ->
+                                DropdownMenuItem(
+                                    text = { Text(GlossaryManager.getLabel(d)) },
+                                    onClick = { _glossaryImportDomain = d; expanded = false }
+                                )
+                            }
+                        }
+                    }
+                    Button(onClick = { glossaryFilePicker.launch("text/*") }) {
+                        Text("选择文件", fontSize = 11.sp)
+                    }
+                }
+
+                // Imported glossaries list
+                val imported = GlossaryManager.importedGlossaries
+                if (imported.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text("已导入", fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                    imported.forEach { ug ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("${ug.fileName} (${ug.entryCount} 条)", fontSize = 11.sp)
+                                Text("领域: ${GlossaryManager.getLabel(ug.domain)}", fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                            }
+                            IconButton(onClick = { GlossaryManager.deleteUserGlossary(ug.id) }, Modifier.size(28.dp)) {
+                                Icon(Icons.Default.Delete, "删除", Modifier.size(16.dp),
+                                    tint = Color(0xFFEF5350))
+                            }
+                        }
+                    }
+                }
+
+                // Import result feedback
+                if (_glossaryImportResult.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    val isError = _glossaryImportResult.contains("失败") || _glossaryImportResult.contains("错误")
+                    Text(_glossaryImportResult, fontSize = 11.sp,
+                        color = if (isError) Color(0xFFEF5350) else Color(0xFF4CAF50))
+                }
             }
 
             // 3.5) AI 润色
@@ -2187,14 +2458,30 @@ class MainActivity : ComponentActivity() {
                 tests.add { apiTestManager.testLocalServer(_localServerUrl, _localServerModel) }
             }
 
-            for ((i, test) in tests.withIndex()) {
-                _apiTestProgress = "${i + 1}/${tests.size}"
+            val semaphore = Semaphore(3)
+            val completed = java.util.concurrent.atomic.AtomicInteger(0)
+            val total = tests.size
+
+            val deferreds = tests.map { test ->
+                async(Dispatchers.IO) {
+                    semaphore.acquire()
+                    try {
+                        test()
+                    } finally {
+                        semaphore.release()
+                        completed.incrementAndGet()
+                    }
+                }
+            }
+
+            for (deferred in deferreds) {
                 try {
-                    val result = test()
+                    val result = deferred.await()
                     _apiTestResults.add(result)
                 } catch (e: Throwable) {
                     log("API测试异常: ${e.message}")
                 }
+                _apiTestProgress = "${completed.get()}/$total"
             }
             _apiTestRunning = false
             _apiTestProgress = "完成 (${_apiTestResults.count { it.overallSuccess }}/${_apiTestResults.size} 通过)"
@@ -2581,12 +2868,16 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Status: translation progress
+                // Status: translation progress or quality upgrade indicator
+                val hasUpgrade = para.segments.any { it.qualityZh.isNotBlank() }
                 if (zh.isNotBlank() && para.anyTranslating) {
                     Spacer(Modifier.height(4.dp))
                     val done = para.segments.count { !it.translating }
                     Text("翻译中 ($done/${para.segments.size})", fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
+                } else if (hasUpgrade) {
+                    Spacer(Modifier.height(4.dp))
+                    Text("已优化", fontSize = 10.sp, color = Color(0xFF4CAF50).copy(alpha = 0.7f))
                 }
             }
         }

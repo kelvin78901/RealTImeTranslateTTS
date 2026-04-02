@@ -8,14 +8,36 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 
 ---
 
-## 更新计划 / Upcoming Enhancements
+## 最新更新 / Latest Updates (2026-04)
 
-- 多语言互译体验优化（中英默认，支持更多语种双向互译）
-- 专业领域 / 场景预设输入（如会议、客服、医学、游戏等）
-- AI 助手对话：可基于当前会话历史进行追问、总结、草拟回复
-- 多语言界面切换：可选中文或英文 UI，默认中文显示
-- 对话结束后自动整理内容和大纲并上传云
-- 增加传译速率、质量和延迟水平调整的不同模式
+- **SWR 双通道翻译**：支持“先快后优”升级显示（Fast Path + Quality Path）
+- **翻译上下文增强**：新增 `latencyMode`（实时/平衡/质量）、`background`（可选背景信息）、`domainHint`（领域提示）
+- **术语库系统升级**：内置领域词库 + 开源词库下载 + 用户自定义上传（CSV/TSV）
+- **历史记录精确回填**：基于 `seqId` 进行快译/优译落库，减少高并发错位
+- **并发稳定性增强**：段落状态机 + TTL 清理、ONNX 本地翻译并发闸门与资源释放优化
+
+---
+
+## 更新进度 / Roadmap Status
+
+### ✅ 已完成 / Done
+- SWR 双通道翻译（先快后优）与“已优化”结果升级展示
+- 翻译上下文增强：`latencyMode` / `background` / `domainHint`
+- 领域词库路由：`auto/general/meeting/medical/customer_support/game`
+- 术语库管理：内置词库、开源词库下载、用户上传（CSV/TSV）
+- 历史记录 `seqId` 精确回填与优译覆盖落库
+- 并发稳定性优化：段落状态机、TTL 兜底清理、ONNX 并发闸门
+
+### 🚧 进行中 / In Progress
+- 多语言互译体验优化（中英默认，逐步扩展更多语种双向互译）
+- 术语库来源扩展与质量治理（来源分级、许可校验、冲突处理）
+- 翻译质量可观测性完善（优译触发率/超时率/术语命中率）
+
+### 🗺️ 规划中 / Planned
+- AI 助手对话：基于当前会话历史追问、总结、草拟回复
+- 多语言界面切换：中文 / 英文 UI
+- 对话结束后自动整理内容与大纲并上传云
+- 更细粒度的传译策略配置（速度/质量/延迟档位与场景模板）
 
 ---
 
@@ -40,6 +62,19 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 | 本地服务器（Ollama 等） | 自托管 LLM 推理服务器（如 qwen2.5） |
 | Opus-MT / NLLB（离线 ONNX） | 本地 ONNX 离线翻译模型，完全私密 |
 
+### 翻译增强（SWR + 上下文 + 词库）
+- **SWR 先快后优**：先返回低延迟结果，再在后台输出优译（可视化“已优化”）
+- **延迟模式**：`实时(REALTIME)` / `平衡(BALANCED)` / `质量(QUALITY)`
+- **背景信息输入**：可选 `background` 帮助模型理解上下文（不直接输出）
+- **领域路由**：`auto / general / meeting / medical / customer_support / game`
+- **术语注入**：按领域自动注入术语，提高专有名词一致性
+
+### 术语库管理
+- **内置词库**：通用、会议、医疗、客服、游戏
+- **开源词库下载**：支持按来源下载并本地缓存（含许可证白名单校验）
+- **用户上传词库**：支持导入 CSV/TSV（英文,中文两列）
+- **优先级合并**：`用户词库 > 下载词库 > 内置词库`
+
 ### AI 润色
 支持在离线翻译结果基础上，调用快速 LLM（Groq / OpenAI / 本地服务器）进行语法校正与自然度优化。
 
@@ -60,6 +95,7 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 
 ### 其他功能
 - **翻译历史**：按会话分组保存，支持搜索与重命名
+- **优译覆盖落库**：SWR 优译可覆盖快译并持久化到历史
 - **TTS 回声抑制**：麦克风模式下自动抑制 TTS 输出被再次识别
 - **智能 ASR 过滤**：过滤填充词、噪声、音乐干扰、回声等
 - **延迟指标面板**：实时显示 ASR / 翻译 / 润色 / TTS 各阶段耗时
@@ -85,8 +121,11 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 MainActivity               ← 主界面（Jetpack Compose）
 ├── Vosk / SherpaWhisperAsr / SystemASR / WhisperApiAsr
 │        └── ASR 结果
-├── TranslationPipeline    ← 并发翻译 + 有序输出
+├── TranslationPipeline    ← 并发翻译 + SWR 优译 + 有序输出
+│   ├── TranslationContext (latencyMode / background / domainHint)
+│   ├── GlossaryManager    (术语路由与注入)
 │   ├── TranslationEngine  (MLKit / LLM / DeepL / Server / ONNX)
+│   ├── QualityEngine      (可选后台优译通道)
 │   └── TranslationRefiner (可选 LLM 润色)
 ├── TTS Consumer
 │   └── EdgeTts / SystemTts / GoogleTts / OpenAiTts / SherpaOnnxTts

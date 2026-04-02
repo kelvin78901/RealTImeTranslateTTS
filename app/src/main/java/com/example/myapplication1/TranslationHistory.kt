@@ -13,7 +13,7 @@ import java.util.UUID
  */
 class TranslationHistory(private val filesDir: File) {
 
-    data class Entry(val en: String, val zh: String, val timestamp: Long)
+    data class Entry(val en: String, val zh: String, val timestamp: Long, val seqId: Int = -1)
     data class Session(
         val id: String,
         val startTime: Long,
@@ -52,7 +52,7 @@ class TranslationHistory(private val filesDir: File) {
                 val eArr = sObj.getJSONArray("entries")
                 for (j in 0 until eArr.length()) {
                     val e = eArr.getJSONObject(j)
-                    entries.add(Entry(e.getString("en"), e.getString("zh"), e.getLong("ts")))
+                    entries.add(Entry(e.getString("en"), e.getString("zh"), e.getLong("ts"), e.optInt("seqId", -1)))
                 }
                 sessions.add(Session(
                     sObj.getString("id"),
@@ -112,12 +112,43 @@ class TranslationHistory(private val filesDir: File) {
         scheduleSave()
     }
 
-    /** Update the Chinese translation for a specific English entry. */
+    /** Update the Chinese translation for a specific English entry (legacy, matches by en text). */
     fun updateLastZh(en: String, zh: String) {
         val session = sessions.find { it.id == currentSessionId } ?: return
         val idx = session.entries.indexOfLast { it.en == en && it.zh.isBlank() }
         if (idx >= 0) {
-            session.entries[idx] = Entry(en, zh, session.entries[idx].timestamp)
+            session.entries[idx] = session.entries[idx].copy(zh = zh)
+            scheduleSave()
+        }
+    }
+
+    /** Append a pending entry identified by seqId (zh will be filled later). */
+    fun appendPending(seqId: Int, en: String) {
+        if (currentSessionId == null) newSession()
+        val session = sessions.find { it.id == currentSessionId } ?: return
+        session.entries.add(Entry(en, "", System.currentTimeMillis(), seqId))
+        scheduleSave()
+    }
+
+    /** Fill in the Chinese translation for an entry by its seqId (first-write only, zh must be blank). */
+    fun updateZhBySeqId(seqId: Int, zh: String) {
+        val session = sessions.find { it.id == currentSessionId } ?: return
+        val idx = session.entries.indexOfLast { it.seqId == seqId && it.zh.isBlank() }
+        if (idx >= 0) {
+            session.entries[idx] = session.entries[idx].copy(zh = zh)
+            scheduleSave()
+        }
+    }
+
+    /**
+     * Upsert: overwrite zh for a seqId regardless of current value.
+     * Used by the SWR quality path to replace fast translation with quality translation.
+     */
+    fun upsertZhBySeqId(seqId: Int, zh: String) {
+        val session = sessions.find { it.id == currentSessionId } ?: return
+        val idx = session.entries.indexOfLast { it.seqId == seqId }
+        if (idx >= 0) {
+            session.entries[idx] = session.entries[idx].copy(zh = zh)
             scheduleSave()
         }
     }
@@ -181,6 +212,7 @@ class TranslationHistory(private val filesDir: File) {
                             put("en", e.en)
                             put("zh", e.zh)
                             put("ts", e.timestamp)
+                            if (e.seqId >= 0) put("seqId", e.seqId)
                         })
                     }
                     put("entries", eArr)

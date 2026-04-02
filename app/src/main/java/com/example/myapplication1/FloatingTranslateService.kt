@@ -19,6 +19,10 @@ import android.util.TypedValue
 import android.view.*
 import android.widget.*
 import com.example.myapplication1.translation.*
+import com.example.myapplication1.translation.TranslationMeta
+import com.example.myapplication1.translation.TranslationContext
+import com.example.myapplication1.translation.LatencyMode
+import com.example.myapplication1.translation.GlossaryManager
 import com.example.myapplication1.tts.EdgeTts
 import com.example.myapplication1.tts.GoogleTranslateTts
 import com.google.mlkit.nl.translate.TranslateLanguage
@@ -112,6 +116,10 @@ class FloatingTranslateService : Service() {
 
     // Translation pipeline with ordered delivery
     private lateinit var translationPipeline: TranslationPipeline
+    private var floatingQualityEngine: TranslationEngine? = null
+    private var floatingLatencyMode = 0
+    private var floatingBackground = ""
+    private var floatingDomainHint = "auto"
 
     // UI refs
     private var tvPartial: TextView? = null
@@ -132,11 +140,23 @@ class FloatingTranslateService : Service() {
         translationHistory = TranslationHistory(filesDir)
         translationHistory?.load()
         translationHistory?.continueOrNew()
+        // Initialize glossary system (idempotent — safe if MainActivity already called it)
+        GlossaryManager.init(this)
         // Initialize translation pipeline with ordered delivery
         translationPipeline = TranslationPipeline(scope)
         translationPipeline.setCallback(floatingPipelineCallback)
         translationPipeline.setEngine(translationEngine ?: MlKitTranslation(mlkitTranslator))
+        translationPipeline.setQualityEngine(floatingQualityEngine)
         translationPipeline.setRefiner(translationRefiner)
+        translationPipeline.translationContext = TranslationContext(
+            background = floatingBackground,
+            domainHint = floatingDomainHint,
+            latencyMode = when (floatingLatencyMode) {
+                1 -> LatencyMode.BALANCED
+                2 -> LatencyMode.QUALITY
+                else -> LatencyMode.REALTIME
+            }
+        )
         initTts()
         initVosk()
         startTtsConsumer()
@@ -166,6 +186,7 @@ class FloatingTranslateService : Service() {
         try { systemTts?.stop(); systemTts?.shutdown() } catch (_: Throwable) {}
         edgeTts?.close(); googleTts.close()
         translationEngine?.close()
+        floatingQualityEngine?.close()
         translationHistory?.close()
         try { mlkitTranslator.close() } catch (_: Throwable) {}
         try { windowManager?.removeView(floatingView) } catch (_: Throwable) {}
@@ -218,6 +239,26 @@ class FloatingTranslateService : Service() {
             }
             else -> null
         }
+
+        // Build quality engine for SWR dual-channel (same logic as MainActivity)
+        val latencyMode = p.getInt("latency_mode", 0)
+        if (latencyMode > 0) {
+            val openaiKey = p.getString("openai_key", "") ?: ""
+            val groqKey = p.getString("groq_key", "") ?: ""
+            val deeplKey = p.getString("deepl_key", "") ?: ""
+            val localUrl = p.getString("local_server_url", "") ?: ""
+            val localModel = p.getString("local_server_model", "qwen2.5:7b") ?: "qwen2.5:7b"
+            floatingQualityEngine = when {
+                translationEngineType != 1 && openaiKey.isNotBlank() -> LLMTranslation(openaiKey)
+                translationEngineType != 3 && deeplKey.isNotBlank() -> DeepLTranslation(deeplKey)
+                translationEngineType != 2 && groqKey.isNotBlank() -> LLMTranslation(groqKey, "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile")
+                translationEngineType != 4 && localUrl.isNotBlank() -> LocalServerTranslation(localUrl, localModel)
+                else -> null
+            }
+            floatingLatencyMode = latencyMode
+        }
+        floatingBackground = p.getString("background_text", "") ?: ""
+        floatingDomainHint = p.getString("domain_hint", "auto") ?: "auto"
 
         // Cache smart filter settings
         smartFilterEnabled = p.getBoolean("smart_filter_enabled", true)
@@ -405,7 +446,7 @@ class FloatingTranslateService : Service() {
         }
         override fun onTranslationResult(seqId: Int, en: String, zh: String) {
             updateTranslation("$en\n→ $zh")
-            translationHistory?.append(en, zh)
+            translationHistory?.updateZhBySeqId(seqId, zh)
             translationCallback?.onFloatingTranslation(en, zh)
         }
         override fun onTranslationError(seqId: Int, en: String, error: String) {
@@ -418,12 +459,17 @@ class FloatingTranslateService : Service() {
         override fun onLatencyMeasured(translationMs: Long) {}
         override fun onCacheHit(seqId: Int) {}
         override fun onParagraphRefined(paragraphId: Int, refinedZh: String) {
-            updateTranslation("→ $refinedZh")
+            if (refinedZh.isNotBlank()) updateTranslation("→ $refinedZh")
+        }
+        override fun onTranslationUpgraded(seqId: Int, en: String, zh: String, meta: TranslationMeta) {
+            updateTranslation("$en\n→ $zh ✓")
+            translationHistory?.upsertZhBySeqId(seqId, zh)
         }
     }
 
     private fun onSentence(en: String) {
         val seqId = translationPipeline.allocateSeqId()
+        translationHistory?.appendPending(seqId, en)
         translationPipeline.submitSentence(seqId, floatingParagraphId, en)
     }
 
@@ -432,8 +478,27 @@ class FloatingTranslateService : Service() {
     private fun startTtsConsumer() {
         ttsConsumerJob = scope.launch {
             for (text in ttsQueue) {
-                if (autoSpeak) speakZh(text)
+                if (autoSpeak) {
+                    // Long sentence protection: split at sentence boundaries if too long
+                    if (text.length > 200) {
+                        val parts = text.chunked(200)
+                        for (part in parts) speakZh(part)
+                    } else {
+                        speakZh(text)
+                    }
+                }
                 ttsPendingCount.decrementAndGet()
+
+                // Max cumulative queue protection: if queue is too deep, drain excess
+                if (ttsPendingCount.get() > 10) {
+                    var drained = 0
+                    while (ttsPendingCount.get() > 3) {
+                        ttsQueue.tryReceive().getOrNull() ?: break
+                        ttsPendingCount.decrementAndGet()
+                        drained++
+                    }
+                    if (drained > 0) Log.d(TAG, "TTS queue overflow: drained $drained items")
+                }
             }
         }
     }
