@@ -19,6 +19,7 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -102,7 +103,9 @@ class MainActivity : ComponentActivity() {
     )
     data class Paragraph(
         val id: Int,
-        val segments: List<Segment> = emptyList()
+        val segments: List<Segment> = emptyList(),
+        /** 从历史加载的只读段落（不可再追加新句子）。 */
+        val fromHistory: Boolean = false
     ) {
         val combinedEn: String get() = segments.joinToString(" ") { it.en }
         val rawZh: String get() = segments.filter { it.zh.isNotBlank() }.joinToString("") {
@@ -246,6 +249,19 @@ class MainActivity : ComponentActivity() {
     private var _glossaryImportResult by mutableStateOf("")
     private var _newKeyName by mutableStateOf("")
     private var _newKeyValue by mutableStateOf("")
+
+    // ---- 设置页导航（三级菜单） ----
+    private enum class SettingsScreen { Main, General, Voice, Translation, Advanced }
+    private var _settingsScreen by mutableStateOf(SettingsScreen.Main)
+
+    // ---- 段落聚合配置 ----
+    private var _paragraphAutoGroup by mutableStateOf(true)
+    private var _paragraphMaxSegments by mutableStateOf(8)
+    private var _paragraphSilenceMs by mutableStateOf(4000)
+
+    // ---- 会话删除确认 ----
+    private var _pendingDeleteSessionId by mutableStateOf<String?>(null)
+    private var _showClearAllDialog by mutableStateOf(false)
 
     // ---- 状态 ----
     private var _voskReady by mutableStateOf(false)
@@ -998,6 +1014,9 @@ class MainActivity : ComponentActivity() {
         _latencyMode = p.getInt("latency_mode", 0)
         _backgroundText = p.getString("background_text", "") ?: ""
         _domainHint = p.getString("domain_hint", "auto") ?: "auto"
+        _paragraphAutoGroup = p.getBoolean("paragraph_auto_group", true)
+        _paragraphMaxSegments = p.getInt("paragraph_max_segments", 8).coerceIn(1, 20)
+        _paragraphSilenceMs = p.getInt("paragraph_silence_ms", 4000).coerceIn(1000, 10000)
     }
 
     private fun saveKey(k: String, v: String) { getSharedPreferences("vri_settings", Context.MODE_PRIVATE).edit().putString(k, v).apply() }
@@ -1054,7 +1073,16 @@ class MainActivity : ComponentActivity() {
         _currentPartial = ""
         paragraphSilenceJob?.cancel()
 
-        if (_paragraphs.isEmpty() || (_paragraphs.last().allDone && _paragraphs.last().segments.size >= 8)) {
+        // 决定是否创建新段落：关闭聚合时每句独立；启用聚合时按 max segments 切分
+        // 从历史加载的段落永远只读，新句子必须新开段落
+        val lastIsHistory = _paragraphs.lastOrNull()?.fromHistory == true
+        val shouldCreateNewParagraph = if (!_paragraphAutoGroup || lastIsHistory) {
+            true  // 关闭聚合 或 上一段来自历史 → 新起一段
+        } else {
+            _paragraphs.isEmpty() ||
+                (_paragraphs.last().allDone && _paragraphs.last().segments.size >= _paragraphMaxSegments)
+        }
+        if (shouldCreateNewParagraph) {
             _paragraphs.add(Paragraph(id = _nextParagraphId++))
         }
 
@@ -1068,22 +1096,32 @@ class MainActivity : ComponentActivity() {
         translationHistory.appendPending(seqId, text)
         translationPipeline.submitSentence(seqId, para.id, text)
 
-        // 5. Schedule silence-based paragraph break
         val currentParaId = para.id
-        paragraphSilenceJob = lifecycleScope.launch {
-            delay(PARAGRAPH_SILENCE_MS)
-            if (_paragraphs.isNotEmpty()) {
-                val lastPara = _paragraphs.last()
-                if (lastPara.id == currentParaId && lastPara.segments.isNotEmpty()) {
-                    // Only trigger refinement if ALL segments are done translating.
-                    // Otherwise refinement would run on incomplete data and
-                    // could race with in-flight translation callbacks.
-                    if (lastPara.allDone) {
-                        translationPipeline.closeParagraph(currentParaId)
+        if (_paragraphAutoGroup) {
+            // 启用聚合：静音阈值到后收尾段落并创建新段落
+            paragraphSilenceJob = lifecycleScope.launch {
+                delay(_paragraphSilenceMs.toLong())
+                if (_paragraphs.isNotEmpty()) {
+                    val lastPara = _paragraphs.last()
+                    if (lastPara.id == currentParaId && lastPara.segments.isNotEmpty()) {
+                        if (lastPara.allDone) {
+                            translationPipeline.closeParagraph(currentParaId)
+                        }
+                        _paragraphs.add(Paragraph(id = _nextParagraphId++))
                     }
-                    // Start fresh paragraph for next utterance regardless
-                    _paragraphs.add(Paragraph(id = _nextParagraphId++))
                 }
+            }
+        } else {
+            // 关闭聚合：每句立即 closeParagraph（润色按句触发）
+            paragraphSilenceJob = lifecycleScope.launch {
+                // 等待翻译完成再 close；最多等 10s 兜底
+                val deadline = System.currentTimeMillis() + 10_000L
+                while (System.currentTimeMillis() < deadline) {
+                    val p = _paragraphs.find { it.id == currentParaId }
+                    if (p == null || p.allDone) break
+                    delay(150)
+                }
+                translationPipeline.closeParagraph(currentParaId)
             }
         }
     }
@@ -1283,6 +1321,101 @@ class MainActivity : ComponentActivity() {
         log("已清空")
     }
 
+    /** 加载指定会话到主界面继续对话。 */
+    private fun loadSessionIntoMain(sessionId: String) {
+        val session = translationHistory.allSessions().find { it.id == sessionId } ?: return
+        // 如在录音则先停止
+        if (_recording) {
+            stopAllAsr()
+            log("已停止录音（切换会话）")
+        }
+        if (_mediaCaptureActive) {
+            stopMediaCapture()
+        }
+        // 切换当前会话
+        translationHistory.switchToSession(sessionId)
+        // 清空主界面并重建段落
+        paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
+        _paragraphs.clear(); _nextParagraphId = 0; _currentPartial = ""
+        if (::translationPipeline.isInitialized) translationPipeline.reset()
+        // 加载 entries：每条独立成一个段落卡片（保证按句显示，避免拼成长串）
+        // 新录入的句子仍按用户聚合设置处理
+        session.entries.forEach { e ->
+            val seg = Segment(seqId = e.seqId, en = e.en, zh = e.zh, translating = false)
+            _paragraphs.add(Paragraph(
+                id = _nextParagraphId++, segments = listOf(seg), fromHistory = true
+            ))
+        }
+        // 导航回主界面
+        _showHistory = false
+        log("已加载会话：${session.displayTitle}")
+    }
+
+    /** 新建一个空会话：清空主界面，但不删除历史。 */
+    private fun onNewConversation() {
+        if (_recording) {
+            log("请先停止录音再新建对话")
+            return
+        }
+        if (_mediaCaptureActive) {
+            log("请先停止媒体捕获再新建对话")
+            return
+        }
+        // 刷新历史持久化
+        translationHistory.flush()
+        // 清空当前 UI 状态
+        paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
+        _paragraphs.clear(); _nextParagraphId = 0; _currentPartial = ""
+        if (::translationPipeline.isInitialized) translationPipeline.reset()
+        // 创建新会话并刷新列表
+        translationHistory.newSession()
+        _historySessions.clear()
+        _historySessions.addAll(translationHistory.allSessions())
+        log("已新建对话")
+    }
+
+    /** 删除单个会话（带正确的状态同步）。 */
+    private fun handleDeleteSession(sessionId: String) {
+        val isCurrent = sessionId == translationHistory.currentSession()?.id
+        // 如删的是当前会话且正在录音，先停止录音
+        if (isCurrent && _recording) {
+            stopAllAsr()
+            log("已停止录音（因删除当前会话）")
+        }
+        // 如删的是当前会话，清空 UI 与翻译流水线状态
+        if (isCurrent) {
+            paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
+            _paragraphs.clear(); _nextParagraphId = 0; _currentPartial = ""
+            if (::translationPipeline.isInitialized) translationPipeline.reset()
+        }
+        // 执行删除
+        translationHistory.deleteSession(sessionId)
+        // 如删的是当前会话，切换到最新会话或创建新会话
+        if (isCurrent) {
+            if (translationHistory.allSessions().isNotEmpty()) {
+                translationHistory.continueOrNew()
+            } else {
+                translationHistory.newSession()
+            }
+        }
+        _historySessions.clear()
+        _historySessions.addAll(translationHistory.allSessions())
+        log("已删除对话")
+    }
+
+    /** 清空所有历史（带正确的状态同步）。 */
+    private fun handleClearAllSessions() {
+        if (_recording) { stopAllAsr(); log("已停止录音（因清空所有历史）") }
+        paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
+        _paragraphs.clear(); _nextParagraphId = 0; _currentPartial = ""
+        if (::translationPipeline.isInitialized) translationPipeline.reset()
+        translationHistory.clearAll()
+        translationHistory.newSession()
+        _historySessions.clear()
+        _historySessions.addAll(translationHistory.allSessions())
+        log("已清空所有历史")
+    }
+
     private fun asrReady() = when (_asrEngine) { 0 -> _systemAsrAvailable; 1 -> _voskReady; 2, 5 -> _openaiKey.isNotBlank(); 3 -> _groqKey.isNotBlank(); 4 -> _localWhisperReady; else -> false }
     private fun asrLabel(): String {
         val asr = when (_asrEngine) { 0 -> "系统识别"; 1 -> "Vosk"; 2 -> "OpenAI"; 3 -> "Groq"; 4 -> "Whisper ${selectedWhisperModel().label}"; 5 -> "GPT-4o"; else -> "" }
@@ -1296,31 +1429,45 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun AppUI() {
+        BackHandler(enabled = _showHistory) { _showHistory = false }
+        if (_showHistory) {
+            HistoryScreen()
+            return
+        }
         val drawerState = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
 
         ModalNavigationDrawer(
             drawerState = drawerState,
-            drawerContent = { ModalDrawerSheet(Modifier.width(310.dp)) { DrawerContent() } }
+            drawerContent = { ModalDrawerSheet(Modifier.width(310.dp)) { DrawerContent(drawerState) } }
         ) {
             Scaffold(
                 topBar = {
                     TopAppBar(
                         navigationIcon = { IconButton({ scope.launch { drawerState.open() } }) { Icon(Icons.Default.Menu, "菜单") } },
                         title = {
+                            val curId = translationHistory.currentSession()?.id
+                            val currentSessionNum = if (curId == null) 0
+                            else translationHistory.allSessions().sortedBy { it.startTime }
+                                .indexOfFirst { it.id == curId }
+                                .let { if (it >= 0) it + 1 else 0 }
                             Column {
                                 Text("实时语音翻译", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                                Text(asrLabel(), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                                Text(
+                                    if (currentSessionNum > 0) "#$currentSessionNum · ${asrLabel()}" else asrLabel(),
+                                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                )
                             }
                         },
                         actions = {
-                            StatusDot(asrReady(), "ASR"); StatusDot(translationReady(), "翻译"); StatusDot(_ttsReady && _ttsLangOk, "TTS")
-                            Spacer(Modifier.width(4.dp))
+                            IconButton({ onNewConversation() }) {
+                                Icon(Icons.Default.AddCircleOutline, "新建对话")
+                            }
                             IconButton({ _showHistory = !_showHistory }) {
                                 Icon(Icons.Default.History, "历史",
                                     tint = if (_showHistory) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                             }
-                            IconButton({ clearAll() }) { Icon(Icons.Default.Delete, "清空") }
+                            IconButton({ clearAll() }) { Icon(Icons.Default.ClearAll, "清空当前") }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
                     )
@@ -1359,6 +1506,25 @@ class MainActivity : ComponentActivity() {
                 }
 
                 Column(Modifier.fillMaxSize().padding(pad)) {
+                    // 状态条：ASR/翻译/TTS 三个状态点（从 TopAppBar 移出以避免拥挤）
+                    Surface(
+                        color = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 0.dp,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            CompactStatusDot(asrReady(), "ASR")
+                            Spacer(Modifier.width(10.dp))
+                            CompactStatusDot(translationReady(), "翻译")
+                            Spacer(Modifier.width(10.dp))
+                            CompactStatusDot(_ttsReady && _ttsLangOk, "TTS")
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
                     // 延迟指标栏
                     if (_recording || _ttsQueueSize > 0) {
                         val dimColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
@@ -1420,10 +1586,48 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
-                    if (_showHistory) HistoryArea(Modifier.weight(1f))
-                    else ConversationArea(Modifier.weight(1f))
+                    ConversationArea(Modifier.weight(1f))
                     Spacer(Modifier.height(80.dp))
                 }
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun HistoryScreen() {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    navigationIcon = {
+                        IconButton({ _showHistory = false }) {
+                            Icon(Icons.Default.ArrowBack, "返回")
+                        }
+                    },
+                    title = {
+                        Text("翻译历史", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    },
+                    actions = {
+                        IconButton({
+                            onNewConversation()
+                            _showHistory = false
+                        }) {
+                            Icon(Icons.Default.AddCircleOutline, "新建对话")
+                        }
+                        if (_historySessions.isNotEmpty()) {
+                            IconButton({ _showClearAllDialog = true }) {
+                                Icon(Icons.Default.Delete, "清空全部",
+                                     tint = Color(0xFFEF5350).copy(alpha = 0.8f))
+                            }
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface)
+                )
+            }
+        ) { pad ->
+            Box(Modifier.fillMaxSize().padding(pad)) {
+                HistoryArea(Modifier.fillMaxSize())
             }
         }
     }
@@ -1437,21 +1641,183 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** 横向紧凑状态点：圆点 + 标签左右排列，占用宽度小。 */
+    @Composable
+    private fun CompactStatusDot(ok: Boolean, label: String) {
+        val c by animateColorAsState(if (ok) Color(0xFF4CAF50) else Color(0xFFBDBDBD))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(7.dp).clip(CircleShape).background(c))
+            Spacer(Modifier.width(4.dp))
+            Text(label, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f))
+        }
+    }
+
     // ===================== Drawer =====================
 
     @Composable
-    private fun DrawerContent() {
-        Column(Modifier.fillMaxHeight().verticalScroll(rememberScrollState()).padding(16.dp)) {
-            Text("设置", fontWeight = FontWeight.Bold, fontSize = 22.sp)
-            Spacer(Modifier.height(16.dp))
+    private fun DrawerContent(drawerState: DrawerState) {
+        // 非主页时拦截返回键返回主页
+        BackHandler(enabled = drawerState.isOpen && _settingsScreen != SettingsScreen.Main) {
+            _settingsScreen = SettingsScreen.Main
+        }
 
-            // 1) 基本设置
-            CollapsibleSection("基本设置", Icons.Default.Settings) {
-                SettingSwitch("自动播报翻译", _autoSpeak) { _autoSpeak = it; saveBool("auto_speak", it) }
+        Column(Modifier.fillMaxHeight()) {
+            // 顶部 header：主页显示标题，子页显示返回按钮
+            if (_settingsScreen == SettingsScreen.Main) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("设置", fontWeight = FontWeight.Bold, fontSize = 22.sp)
+                }
+            } else {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    IconButton({ _settingsScreen = SettingsScreen.Main }) {
+                        Icon(Icons.Default.ArrowBack, "返回")
+                    }
+                    Text(
+                        when (_settingsScreen) {
+                            SettingsScreen.General -> "通用"
+                            SettingsScreen.Voice -> "语音"
+                            SettingsScreen.Translation -> "翻译"
+                            SettingsScreen.Advanced -> "高级"
+                            else -> ""
+                        },
+                        fontWeight = FontWeight.Bold, fontSize = 18.sp
+                    )
+                }
+                HorizontalDivider()
             }
 
-            // 2) 语音识别
-            CollapsibleSection("语音识别引擎", Icons.Default.Mic) {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+                Spacer(Modifier.height(8.dp))
+                when (_settingsScreen) {
+                    SettingsScreen.Main -> SettingsMainPage()
+                    SettingsScreen.General -> GeneralSettingsPage()
+                    SettingsScreen.Voice -> VoiceSettingsPage()
+                    SettingsScreen.Translation -> TranslationSettingsPage()
+                    SettingsScreen.Advanced -> AdvancedSettingsPage()
+                }
+                Spacer(Modifier.height(40.dp))
+            }
+        }
+    }
+
+    @Composable
+    private fun SettingsMainPage() {
+        CategoryEntry("通用", "基本偏好与段落聚合", Icons.Default.Tune, SettingsScreen.General)
+        CategoryEntry("语音", "ASR / TTS / 音频设备 / 智能过滤", Icons.Default.Mic, SettingsScreen.Voice)
+        CategoryEntry("翻译", "翻译引擎 / 增强 / 词库 / 润色", Icons.Default.Language, SettingsScreen.Translation)
+        CategoryEntry("高级", "媒体转译 / API / 日志", Icons.Default.Settings, SettingsScreen.Advanced)
+        Spacer(Modifier.height(20.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(12.dp))
+        Text("关于", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+        Text("RealTimeTranslateTTS", fontSize = 11.sp,
+             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+    }
+
+    @Composable
+    private fun CategoryEntry(
+        title: String,
+        subtitle: String,
+        icon: ImageVector,
+        screen: SettingsScreen
+    ) {
+        Surface(
+            onClick = { _settingsScreen = screen },
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        ) {
+            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(icon, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text(subtitle, fontSize = 11.sp,
+                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                }
+                Icon(Icons.Default.KeyboardArrowRight, null,
+                     Modifier.size(18.dp),
+                     tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+            }
+        }
+    }
+
+    // ==================== 分类页面 ====================
+
+    @Composable
+    private fun GeneralSettingsPage() {
+        // 1) 基本设置
+        CollapsibleSection("基本设置", Icons.Default.Settings, defaultExpanded = true) {
+            SettingSwitch("自动播报翻译", _autoSpeak) { _autoSpeak = it; saveBool("auto_speak", it) }
+        }
+        // 2) 段落聚合（新增）
+        @Suppress("DEPRECATION")
+        CollapsibleSection("段落聚合", Icons.Default.List, defaultExpanded = true) {
+            Text("关闭后每句独立显示，不会自动合并为段落", fontSize = 10.sp,
+                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                 modifier = Modifier.padding(bottom = 6.dp))
+
+            SettingSwitch("自动聚合段落", _paragraphAutoGroup) {
+                _paragraphAutoGroup = it
+                saveBool("paragraph_auto_group", it)
+            }
+
+            AnimatedVisibility(_paragraphAutoGroup) {
+                Column(Modifier.padding(start = 8.dp, top = 6.dp)) {
+                    Text("每段最大句数：$_paragraphMaxSegments", fontSize = 12.sp,
+                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                    Slider(
+                        value = _paragraphMaxSegments.toFloat(),
+                        onValueChange = { _paragraphMaxSegments = it.toInt().coerceIn(1, 20) },
+                        onValueChangeFinished = { saveInt("paragraph_max_segments", _paragraphMaxSegments) },
+                        valueRange = 1f..20f, steps = 18
+                    )
+                    val secs = _paragraphSilenceMs / 1000f
+                    Text("静音断句：${"%.1f".format(secs)}s", fontSize = 12.sp,
+                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                    Slider(
+                        value = _paragraphSilenceMs.toFloat(),
+                        onValueChange = { _paragraphSilenceMs = it.toInt().coerceIn(1000, 10000) },
+                        onValueChangeFinished = { saveInt("paragraph_silence_ms", _paragraphSilenceMs) },
+                        valueRange = 1000f..10000f, steps = 17
+                    )
+                }
+            }
+
+            AnimatedVisibility(!_paragraphAutoGroup) {
+                Surface(color = Color(0xFFFFF3CD), shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                    Text("⚠ 关闭聚合时，每句都会触发 AI 润色（如启用），可能增加 API 调用次数",
+                         fontSize = 10.sp, color = Color(0xFF856404),
+                         modifier = Modifier.padding(8.dp))
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun VoiceSettingsPage() {
+        LegacySectionsForCategory(SettingsScreen.Voice)
+    }
+
+    @Composable
+    private fun TranslationSettingsPage() {
+        LegacySectionsForCategory(SettingsScreen.Translation)
+    }
+
+    @Composable
+    private fun AdvancedSettingsPage() {
+        LegacySectionsForCategory(SettingsScreen.Advanced)
+    }
+
+    // ==================== 原有配置区（按分类过滤） ====================
+
+    @Composable
+    private fun LegacySectionsForCategory(category: SettingsScreen) {
+        // 2) 语音识别
+        if (category == SettingsScreen.Voice) CollapsibleSection("语音识别引擎", Icons.Default.Mic) {
                 AsrOption(0, "Android 系统", if (_systemAsrAvailable) "需联网" else "不可用")
                 AsrOption(1, "Vosk 离线", "离线，准确率一般")
                 AsrOption(2, "OpenAI Whisper", "API · \$0.006/min")
@@ -1466,7 +1832,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // 3) 翻译引擎
-            CollapsibleSection("翻译引擎", Icons.Default.Language) {
+            if (category == SettingsScreen.Translation) CollapsibleSection("翻译引擎", Icons.Default.Language) {
                 TransOption(0, "MLKit 离线", "离线翻译，速度中等")
                 TransOption(1, "OpenAI GPT", "API · 高质量")
                 TransOption(2, "Groq LLM", "API · 免费额度 · 极速")
@@ -1514,7 +1880,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // 3.3) 翻译增强（延迟模式、背景信息、领域词库）
-            CollapsibleSection("翻译增强", Icons.Default.Tune) {
+            if (category == SettingsScreen.Translation) CollapsibleSection("翻译增强", Icons.Default.Tune) {
                 Text("提升翻译准确率与术语一致性", fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                     modifier = Modifier.padding(bottom = 6.dp))
@@ -1585,7 +1951,7 @@ class MainActivity : ComponentActivity() {
 
             // 3.4) 术语库管理
             @Suppress("DEPRECATION")
-            CollapsibleSection("术语库管理", Icons.Default.LibraryBooks) {
+            if (category == SettingsScreen.Translation) CollapsibleSection("术语库管理", Icons.Default.LibraryBooks) {
                 Text("管理内置、下载和自定义术语库", fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                     modifier = Modifier.padding(bottom = 6.dp))
@@ -1691,7 +2057,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // 3.5) AI 润色
-            CollapsibleSection("AI 润色", Icons.Default.AutoAwesome) {
+            if (category == SettingsScreen.Translation) CollapsibleSection("AI 润色", Icons.Default.AutoAwesome) {
                 Text("翻译后用 LLM 结合上下文修正整段话，再送入 TTS 播报", fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                     modifier = Modifier.padding(bottom = 6.dp))
@@ -1798,7 +2164,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // 4) 语音合成
-            CollapsibleSection("语音合成引擎", Icons.AutoMirrored.Filled.VolumeUp) {
+            if (category == SettingsScreen.Voice) CollapsibleSection("语音合成引擎", Icons.AutoMirrored.Filled.VolumeUp) {
                 TtsOption(0, "Edge 神经语音", "微软，接近真人")
                 TtsOption(1, "系统 TTS", "Google 系统语音")
                 TtsOption(2, "Google 翻译", "基础音质")
@@ -1826,7 +2192,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // 5) 音频设备
-            CollapsibleSection("音频设备", Icons.Default.Headphones) {
+            if (category == SettingsScreen.Voice) CollapsibleSection("音频设备", Icons.Default.Headphones) {
                 Text("输入设备", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                 SmallRadio("默认麦克风", _selectedInputId == 0 && !_mediaCaptureActive) {
@@ -1881,7 +2247,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // 6) 智能过滤
-            CollapsibleSection("智能过滤", Icons.Default.FilterList) {
+            if (category == SettingsScreen.Voice) CollapsibleSection("智能过滤", Icons.Default.FilterList) {
                 SettingSwitch("启用智能过滤", _smartFilterEnabled) {
                     _smartFilterEnabled = it; saveBool("smart_filter_enabled", it)
                     if (!it) AsrTextFilter.reset()
@@ -1903,7 +2269,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // 7) 媒体转译
-            CollapsibleSection("媒体转译", Icons.Default.Audiotrack) {
+            if (category == SettingsScreen.Advanced) CollapsibleSection("媒体转译", Icons.Default.Audiotrack) {
                 Text(
                     "捕获后台播放的媒体或通话音频进行实时翻译（需 Android 10+）",
                     fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
@@ -1928,7 +2294,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // 8) 悬浮窗
-            CollapsibleSection("悬浮窗模式", Icons.Default.Layers) {
+            if (category == SettingsScreen.Advanced) CollapsibleSection("悬浮窗模式", Icons.Default.Layers) {
                 Text(
                     "启动悬浮窗后可切换到其他应用，继续后台翻译",
                     fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
@@ -1951,18 +2317,18 @@ class MainActivity : ComponentActivity() {
             }
 
             // 9) API 密钥管理
-            CollapsibleSection("API 密钥管理", Icons.Default.VpnKey) {
+            if (category == SettingsScreen.Advanced) CollapsibleSection("API 密钥管理", Icons.Default.VpnKey) {
                 ApiKeyManagerPanel()
             }
 
             // 10) API 连通测试
-            CollapsibleSection("API 连通测试", Icons.Default.Wifi) {
+            if (category == SettingsScreen.Advanced) CollapsibleSection("API 连通测试", Icons.Default.Wifi) {
                 ApiTestPanel()
             }
 
             // 11) 日志
             @Suppress("DEPRECATION")
-            CollapsibleSection("系统日志", Icons.Default.List) {
+            if (category == SettingsScreen.Advanced) CollapsibleSection("系统日志", Icons.Default.List) {
                 Column(
                     Modifier.fillMaxWidth().heightIn(max = 200.dp)
                         .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)).padding(8.dp)
@@ -1972,8 +2338,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            Spacer(Modifier.height(40.dp))
-        }
     }
 
     // ---- Collapsible Section ----
@@ -2697,6 +3061,12 @@ class MainActivity : ComponentActivity() {
             if (_historySearchQuery.isBlank()) _historySessions.toList()
             else translationHistory.search(_historySearchQuery)
         }
+        // 会话序号映射：按创建时间升序编号
+        val numberMap = remember(_historySessions.size) {
+            translationHistory.allSessions().sortedBy { it.startTime }
+                .withIndex().associate { (i, s) -> s.id to (i + 1) }
+        }
+        val currentId = translationHistory.currentSession()?.id
 
         // Rename dialog
         if (_editingSessionId != null) {
@@ -2718,15 +3088,60 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        Column(modifier.fillMaxWidth()) {
-            // Header with search
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("翻译历史 (${filtered.size})", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                if (_historySessions.isNotEmpty()) {
-                    TextButton({
-                        translationHistory.clearAll(); _historySessions.clear(); log("历史已清空")
-                    }) { Text("清空", fontSize = 12.sp, color = Color(0xFFEF5350)) }
+        // 单会话删除确认
+        if (_pendingDeleteSessionId != null) {
+            val target = _historySessions.find { it.id == _pendingDeleteSessionId }
+            val isCurrentTarget = _pendingDeleteSessionId == currentId
+            AlertDialog(
+                onDismissRequest = { _pendingDeleteSessionId = null },
+                icon = { Icon(Icons.Default.Warning, null, tint = Color(0xFFEF5350)) },
+                title = { Text("删除对话？") },
+                text = {
+                    Column {
+                        Text("\"${target?.displayTitle ?: ""}\" 将被永久删除（${target?.entries?.size ?: 0} 条记录），此操作无法撤销。")
+                        if (isCurrentTarget) {
+                            Spacer(Modifier.height(8.dp))
+                            Text("⚠ 这是当前对话，删除后主界面将被清空。",
+                                 fontSize = 12.sp, color = Color(0xFFEF5350))
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        _pendingDeleteSessionId?.let { handleDeleteSession(it) }
+                        _pendingDeleteSessionId = null
+                    }) { Text("删除", color = Color(0xFFEF5350)) }
+                },
+                dismissButton = {
+                    TextButton({ _pendingDeleteSessionId = null }) { Text("取消") }
                 }
+            )
+        }
+
+        // 清空全部确认
+        if (_showClearAllDialog) {
+            AlertDialog(
+                onDismissRequest = { _showClearAllDialog = false },
+                icon = { Icon(Icons.Default.Warning, null, tint = Color(0xFFEF5350)) },
+                title = { Text("清空所有历史？") },
+                text = { Text("将删除所有 ${_historySessions.size} 个对话，此操作无法撤销。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        handleClearAllSessions()
+                        _showClearAllDialog = false
+                    }) { Text("清空", color = Color(0xFFEF5350)) }
+                },
+                dismissButton = {
+                    TextButton({ _showClearAllDialog = false }) { Text("取消") }
+                }
+            )
+        }
+
+        Column(modifier.fillMaxWidth()) {
+            // 计数（新建/清空按钮已移至 HistoryScreen 的 TopAppBar）
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("共 ${filtered.size} 个会话", fontSize = 12.sp,
+                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
             }
             // Search bar
             OutlinedTextField(
@@ -2759,30 +3174,60 @@ class MainActivity : ComponentActivity() {
                     items(filtered.size) { i ->
                         val idx = filtered.size - 1 - i
                         val session = filtered[idx]
-                        Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                            elevation = CardDefaults.cardElevation(1.dp)) {
+                        val num = numberMap[session.id] ?: 0
+                        val isCurrent = session.id == currentId
+                        Card(
+                            onClick = { loadSessionIntoMain(session.id) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isCurrent)
+                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.18f)
+                                else MaterialTheme.colorScheme.surface
+                            ),
+                            elevation = CardDefaults.cardElevation(1.dp)
+                        ) {
                             Column(Modifier.padding(14.dp)) {
-                                // Title row with actions
+                                // Title row with number badge + actions
                                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    // 序号徽章
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (isCurrent) MaterialTheme.colorScheme.primary
+                                                else MaterialTheme.colorScheme.surfaceVariant,
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text("#$num", fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                                                 color = if (isCurrent) Color.White
+                                                         else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                                        }
+                                    }
+                                    Spacer(Modifier.width(8.dp))
                                     Text(session.displayTitle, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        modifier = Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (isCurrent) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Surface(shape = RoundedCornerShape(4.dp),
+                                                color = MaterialTheme.colorScheme.primary) {
+                                            Text("当前", fontSize = 9.sp, color = Color.White,
+                                                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                                        }
+                                    }
+                                    Spacer(Modifier.weight(1f))
                                     // Rename
                                     IconButton(onClick = {
                                         _editingSessionId = session.id
                                         _editingTitle = session.title
-                                    }, modifier = Modifier.size(24.dp)) {
+                                    }, modifier = Modifier.size(28.dp)) {
                                         Icon(Icons.Default.Edit, "重命名", Modifier.size(14.dp),
                                             tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
                                     }
-                                    // Delete
-                                    IconButton(onClick = {
-                                        translationHistory.deleteSession(session.id)
-                                        _historySessions.clear(); _historySessions.addAll(translationHistory.allSessions())
-                                        log("已删除会话")
-                                    }, modifier = Modifier.size(24.dp)) {
+                                    // Delete → 确认对话框
+                                    IconButton(onClick = { _pendingDeleteSessionId = session.id },
+                                               modifier = Modifier.size(28.dp)) {
                                         Icon(Icons.Default.Delete, "删除", Modifier.size(14.dp),
-                                            tint = Color(0xFFEF5350).copy(alpha = 0.6f))
+                                            tint = Color(0xFFEF5350).copy(alpha = 0.7f))
                                     }
                                 }
                                 // Time + count
@@ -2793,16 +3238,58 @@ class MainActivity : ComponentActivity() {
                                     Text("${session.entries.size} 句", fontSize = 10.sp,
                                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
                                 }
-                                Spacer(Modifier.height(4.dp))
-                                // Merged paragraph view
-                                Text(session.enParagraph, fontSize = 13.sp, lineHeight = 18.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                                    maxLines = 6, overflow = TextOverflow.Ellipsis)
-                                Spacer(Modifier.height(4.dp))
+                                Spacer(Modifier.height(6.dp))
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
-                                Spacer(Modifier.height(4.dp))
-                                Text(session.zhParagraph, fontSize = 15.sp, fontWeight = FontWeight.Medium,
-                                    lineHeight = 22.sp, maxLines = 8, overflow = TextOverflow.Ellipsis)
+                                Spacer(Modifier.height(6.dp))
+
+                                // 前两条 entry 预览
+                                val entries = session.entries
+                                if (entries.isEmpty()) {
+                                    Text("（无内容）", fontSize = 12.sp, fontStyle = FontStyle.Italic,
+                                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
+                                } else {
+                                    entries.take(2).forEachIndexed { entryIdx, entry ->
+                                        Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                                            Text(
+                                                "${entryIdx + 1}.",
+                                                fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
+                                                modifier = Modifier.width(22.dp)
+                                            )
+                                            Column(Modifier.weight(1f)) {
+                                                Text(
+                                                    entry.en, fontSize = 12.sp, lineHeight = 16.sp,
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                                    maxLines = 2, overflow = TextOverflow.Ellipsis
+                                                )
+                                                if (entry.zh.isNotBlank()) {
+                                                    Text(
+                                                        entry.zh, fontSize = 13.sp, lineHeight = 18.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.padding(top = 1.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // 点击继续提示
+                                    if (entries.size > 2) {
+                                        Text(
+                                            "… 共 ${entries.size} 条，点击继续此对话",
+                                            fontSize = 10.sp, fontStyle = FontStyle.Italic,
+                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                                            modifier = Modifier.padding(start = 22.dp, top = 2.dp)
+                                        )
+                                    } else {
+                                        Text(
+                                            "点击继续此对话",
+                                            fontSize = 10.sp, fontStyle = FontStyle.Italic,
+                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                                            modifier = Modifier.padding(start = 22.dp, top = 2.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

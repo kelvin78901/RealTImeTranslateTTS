@@ -101,6 +101,16 @@ class TranslationHistory(private val filesDir: File) {
         return newSession()
     }
 
+    /** Switch current session to the given id. Returns true if found. */
+    fun switchToSession(id: String): Boolean {
+        val found = sessions.any { it.id == id }
+        if (found) {
+            currentSessionId = id
+            scheduleSave()
+        }
+        return found
+    }
+
     fun currentSession(): Session? = sessions.find { it.id == currentSessionId }
 
     fun allSessions(): List<Session> = sessions.toList()

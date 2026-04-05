@@ -21,6 +21,7 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 ## 更新进度 / Roadmap Status
 
 ### ✅ 已完成 / Done
+- Iter-0（P0）UI 重构：三级设置菜单、段落聚合控制、历史会话交互升级
 - SWR 双通道翻译（先快后优）与“已优化”结果升级展示
 - 翻译上下文增强：`latencyMode` / `background` / `domainHint`
 - 领域词库路由：`auto/general/meeting/medical/customer_support/game`
@@ -46,7 +47,7 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 - 支持更多翻译增强功能（如上下文理解、术语注入、风格调整等）
 - 支持自定义音色和语速的 TTS 输出
 - 增加同步录音功能，方便会议记录和回放
----
+
 
 ## 功能概览 / Features
 
