@@ -2,7 +2,7 @@
 
 > 默认语言：**中文**；（English version below）。
 
-一款 Android 实时语音翻译应用，支持麦克风录音与系统媒体音频的语音识别、翻译和语音合成（TTS）。
+一款 Android 实时语音翻译（同声传译）应用，支持麦克风录音与系统媒体音频的语音识别、翻译和语音合成（TTS）。
 
 An Android app for real-time speech recognition, translation, and text-to-speech (TTS) output — from both microphone input and system/media audio.
 
