@@ -110,7 +110,9 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // ---- ONNX Runtime (离线翻译模型推理) ----
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.3")
+    // MUST match the version bundled in sherpa-onnx.aar (1.17.1) — version mismatch
+    // causes native heap corruption (SIGABRT "pthread_mutex_lock on destroyed mutex").
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.1")
 
     implementation(files("libs/sherpa-onnx.aar"))
     configurations.all {

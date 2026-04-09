@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -57,9 +58,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
+import com.example.myapplication1.asr.SherpaStreamingAsr
 import com.example.myapplication1.asr.SherpaWhisperAsr
 import com.example.myapplication1.asr.WhisperApiAsr
 import com.example.myapplication1.tts.EdgeTts
+import com.example.myapplication1.tts.KokoroTts
+import com.example.myapplication1.tts.VitsTts
 import com.example.myapplication1.translation.*
 import com.example.myapplication1.translation.OnDeviceTranslationModel
 import com.example.myapplication1.translation.TranslationModelManager
@@ -115,7 +119,16 @@ class MainActivity : ComponentActivity() {
         val allDone: Boolean get() = segments.isNotEmpty() && segments.none { it.translating }
     }
 
-    private val _paragraphs = mutableStateListOf<Paragraph>()
+    // Using mutableStateOf(List) instead of mutableStateListOf because
+    // SnapshotStateList element replacement does NOT reliably trigger
+    // LazyColumn item recomposition. With mutableStateOf, every write
+    // creates a new List reference that Compose always detects.
+    private var _paragraphs by mutableStateOf(listOf<Paragraph>())
+
+    // Helpers for immutable list mutations (each creates a new List reference)
+    private fun paragraphsAdd(p: Paragraph) { _paragraphs = _paragraphs + p }
+    private fun paragraphsSet(i: Int, p: Paragraph) { _paragraphs = _paragraphs.toMutableList().also { it[i] = p } }
+    private fun paragraphsClear() { _paragraphs = emptyList() }
     private var _nextParagraphId = 0
     private var _currentPartial by mutableStateOf("")
     private var _recording by mutableStateOf(false)
@@ -272,6 +285,27 @@ class MainActivity : ComponentActivity() {
     private var _localWhisperReady by mutableStateOf(false)
     private var _localWhisperDownloading by mutableStateOf(false)
     private var _downloadProgress by mutableStateOf("")
+
+    // ---- Streaming ASR (Iter-1) ----
+    private var _streamingAsrModelIdx by mutableStateOf(0)
+    private var _streamingAsrReady by mutableStateOf(false)
+    private var _streamingAsrDownloading by mutableStateOf(false)
+    private var _streamingAsrProgress by mutableStateOf("")
+    private lateinit var streamingAsr: SherpaStreamingAsr
+
+    // ---- Kokoro TTS (English) ----
+    private var _kokoroVoiceSid by mutableStateOf(0)
+    private var _kokoroReady by mutableStateOf(false)
+    private var _kokoroDownloading by mutableStateOf(false)
+    private var _kokoroProgress by mutableStateOf("")
+    private lateinit var kokoroTts: KokoroTts
+
+    // ---- Chinese TTS (VITS/Matcha) ----
+    private lateinit var vitsTts: VitsTts
+    private var _vitsTtsReady by mutableStateOf(false)
+    private var _zhTtsModelIdx by mutableStateOf(0)
+    private var _zhTtsDownloading by mutableStateOf(false)
+    private var _zhTtsProgress by mutableStateOf("")
     private var _logs = mutableStateListOf<String>()
 
     // ---- Vosk ----
@@ -346,6 +380,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         edgeTts = EdgeTts(cacheDir)
         sherpaWhisperAsr = SherpaWhisperAsr(this)
+        streamingAsr = SherpaStreamingAsr(this)
+        kokoroTts = KokoroTts(this)
+        vitsTts = VitsTts(this)
         translationModelManager = TranslationModelManager(this)
         translationHistory = TranslationHistory(filesDir)
         _historySessions.addAll(translationHistory.load())
@@ -413,10 +450,10 @@ class MainActivity : ComponentActivity() {
         override fun onFloatingTranslation(en: String, zh: String) {
             runOnUiThread {
                 // Add floating window translation to current paragraph
-                if (_paragraphs.isEmpty()) _paragraphs.add(Paragraph(id = _nextParagraphId++))
+                if (_paragraphs.isEmpty()) paragraphsAdd(Paragraph(id = _nextParagraphId++))
                 val pi = _paragraphs.lastIndex
                 val p = _paragraphs[pi]
-                _paragraphs[pi] = p.copy(segments = p.segments + Segment(en = en, zh = zh, translating = false))
+                paragraphsSet(pi, p.copy(segments = p.segments + Segment(en = en, zh = zh, translating = false)))
                 _historySessions.clear()
                 _historySessions.addAll(translationHistory.allSessions())
             }
@@ -463,6 +500,9 @@ class MainActivity : ComponentActivity() {
         try { systemTts?.stop(); systemTts?.shutdown() } catch (_: Throwable) {}
         sherpaWhisperAsr.release(); edgeTts.close(); googleTts.close()
         try { openAiTts?.close() } catch (_: Throwable) {}
+        if (::streamingAsr.isInitialized) streamingAsr.release()
+        if (::kokoroTts.isInitialized) kokoroTts.release()
+        if (::vitsTts.isInitialized) vitsTts.release()
         cachedTransEngine?.close(); translationHistory.close()
     }
 
@@ -500,14 +540,41 @@ class MainActivity : ComponentActivity() {
         }
         log("Edge TTS 就绪")
 
-        val selModel = selectedWhisperModel()
-        if (sherpaWhisperAsr.isModelDownloaded(selModel)) {
-            lifecycleScope.launch(Dispatchers.IO) {
+        // All sherpa-onnx native inits MUST be serialized — the native library
+        // has global state that crashes on concurrent initialization (SIGABRT
+        // "pthread_mutex_lock called on a destroyed mutex").
+        lifecycleScope.launch(Dispatchers.IO) {
+            val selModel = selectedWhisperModel()
+            if (sherpaWhisperAsr.isModelDownloaded(selModel)) {
                 val ok = sherpaWhisperAsr.initModel(selModel)
                 withContext(Dispatchers.Main) {
                     _localWhisperReady = ok
                     log(if (ok) "本地Whisper [${selModel.label}] 就绪" else "本地Whisper失败")
                 }
+            }
+
+            val selStreamModel = selectedStreamingModel()
+            if (streamingAsr.isModelDownloaded(selStreamModel)) {
+                val ok = streamingAsr.initModel(selStreamModel)
+                withContext(Dispatchers.Main) {
+                    _streamingAsrReady = ok
+                    log(if (ok) "流式ASR [${selStreamModel.label}] 就绪" else "流式ASR初始化失败")
+                }
+            }
+
+            // Kokoro is NOT initialized here — user disabled it for TTS.
+            // Only ONE OfflineTts instance can exist at a time (ONNX Runtime global mutex).
+
+            // Clean up removed model directories
+            try { File(filesDir, "sherpa-matcha-zh-en").deleteRecursively() } catch (_: Throwable) {}
+
+            // Sherpa TTS: init selected model (fallback to AISHELL3 if unavailable)
+            val zhModel = selectedZhTtsModel()
+            val modelToInit = if (vitsTts.isModelDownloaded(zhModel)) zhModel else VitsTts.Model.AISHELL3
+            val vitsOk = vitsTts.initModel(modelToInit)
+            withContext(Dispatchers.Main) {
+                _vitsTtsReady = vitsOk
+                log(if (vitsOk) "${modelToInit.label} 就绪" else "${modelToInit.label} 初始化失败")
             }
         }
     }
@@ -669,7 +736,7 @@ class MainActivity : ComponentActivity() {
         _isTtsSpeaking = true
         _lastTtsLength = text.length
         try {
-            when (_ttsEngine) { 0 -> speakEdge(text); 1 -> speakSystem(text); 2 -> speakGoogle(text); 3 -> speakOpenAi(text) }
+            when (_ttsEngine) { 0 -> speakEdge(text); 1 -> speakSystem(text); 2 -> speakGoogle(text); 3 -> speakOpenAi(text); 4 -> speakKokoro(text); else -> speakEdge(text) }
         } finally {
             _isTtsSpeaking = false
             _ttsSpeakEndTime = System.currentTimeMillis()
@@ -706,7 +773,13 @@ class MainActivity : ComponentActivity() {
         } catch (e: Throwable) { log("OpenAI TTS: ${e.message}"); speakEdge(text) }
     }
 
-    private fun speakManual(text: String) { lifecycleScope.launch { speakZh(text) } }
+    private fun speakManual(text: String) {
+        if (_ttsEngine == 4) {
+            if (::kokoroTts.isInitialized) kokoroTts.stopPlayback()
+            if (::vitsTts.isInitialized) vitsTts.stopPlayback()
+        }
+        lifecycleScope.launch { speakZh(text) }
+    }
 
     // ===================== ASR dispatch =====================
 
@@ -728,6 +801,7 @@ class MainActivity : ComponentActivity() {
             3 -> startWhisperApi(WhisperApiAsr.Provider.GROQ, _groqKey)
             4 -> startLocalWhisper()
             5 -> startWhisperApi(WhisperApiAsr.Provider.GPT4O_MINI, _openaiKey)
+            6 -> startStreamingAsr()
         }
     }
 
@@ -744,6 +818,7 @@ class MainActivity : ComponentActivity() {
             1 -> { stopVosk(); flushVosk() }
             2, 3, 5 -> whisperAsr?.stopGracefully()
             4 -> sherpaWhisperAsr.stopGracefully()
+            6 -> streamingAsr.stopGracefully()
         }
 
         _currentPartial = ""
@@ -943,6 +1018,94 @@ class MainActivity : ComponentActivity() {
         } else _localWhisperReady = false
     }
 
+    // ===================== Streaming ASR (Iter-1) =====================
+
+    private fun selectedStreamingModel() = SherpaStreamingAsr.StreamingModel.entries[_streamingAsrModelIdx]
+    private fun selectedZhTtsModel() = VitsTts.Model.entries[_zhTtsModelIdx.coerceIn(0, VitsTts.Model.entries.lastIndex)]
+
+    private val streamingAsrCb = object : SherpaStreamingAsr.Callback {
+        override fun onPartial(text: String) { _currentPartial = text }
+        override fun onResult(text: String) {
+            if (_asrProcessStart > 0) _asrLatencyMs = System.currentTimeMillis() - _asrProcessStart
+            onAsrResult(text)
+        }
+        override fun onStateChanged(ready: Boolean) { _streamingAsrReady = ready }
+        override fun onDownloadProgress(file: String, percent: Int) { _streamingAsrProgress = "$file: $percent%" }
+        override fun onError(message: String) { log("流式ASR: $message") }
+    }
+
+    private fun startStreamingAsr() {
+        if (!_streamingAsrReady) { log("请先下载流式ASR模型"); return }
+        _recording = true; _asrProcessStart = System.currentTimeMillis()
+        log("开始录音 (Sherpa流式 ${selectedStreamingModel().label})")
+        streamingAsr.start(lifecycleScope, streamingAsrCb)
+    }
+
+    private fun downloadStreamingAsrModel() {
+        if (_streamingAsrDownloading) return
+        _streamingAsrDownloading = true
+        val m = selectedStreamingModel()
+        lifecycleScope.launch {
+            if (streamingAsr.downloadModel(m, streamingAsrCb)) {
+                val ok = withContext(Dispatchers.IO) { streamingAsr.initModel(m) }
+                _streamingAsrReady = ok
+                log(if (ok) "流式ASR [${m.label}] 就绪" else "流式ASR初始化失败")
+            }
+            _streamingAsrDownloading = false; _streamingAsrProgress = ""
+        }
+    }
+
+    private fun switchStreamingAsrModel(idx: Int) {
+        if (_recording) { log("请先停止录音"); return }
+        _streamingAsrModelIdx = idx; saveInt("streaming_asr_model_idx", idx)
+        val m = selectedStreamingModel()
+        if (streamingAsr.isModelDownloaded(m)) {
+            _streamingAsrReady = false
+            lifecycleScope.launch(Dispatchers.IO) {
+                val ok = streamingAsr.initModel(m)
+                withContext(Dispatchers.Main) { _streamingAsrReady = ok; log(if (ok) "切换流式ASR [${m.label}]" else "初始化失败") }
+            }
+        } else _streamingAsrReady = false
+    }
+
+    // ===================== Kokoro TTS (Iter-2) =====================
+
+    /** Engine 4: Sherpa offline TTS. Speed auto-matches the TTS queue depth. */
+    private suspend fun speakKokoro(text: String) {
+        if (!_vitsTtsReady) { log("Sherpa TTS 未就绪"); return }
+        try {
+            // Auto speed: speed up when queue is deep to keep up with live speech
+            val queueDepth = ttsPendingCount.get()
+            val speed = when {
+                queueDepth >= 4 -> 1.4f
+                queueDepth >= 2 -> 1.2f
+                else -> 1.0f
+            }
+            withContext(Dispatchers.IO) { vitsTts.speak(text, sid = _sherpaTtsSid, speed = speed) }
+        } catch (e: Throwable) { log("Sherpa TTS: ${e.message}") }
+    }
+
+    private fun downloadKokoroModel() {
+        if (_kokoroDownloading) return
+        _kokoroDownloading = true
+        lifecycleScope.launch {
+            val cb = object : KokoroTts.Callback {
+                override fun onDownloadProgress(file: String, percent: Int) { _kokoroProgress = "$file: $percent%" }
+                override fun onError(message: String) { log("Kokoro下载: $message") }
+            }
+            if (kokoroTts.downloadModel(cb)) {
+                val ok = withContext(Dispatchers.IO) {
+                    val init = kokoroTts.initModel()
+                    if (init) kokoroTts.warmUp()
+                    init
+                }
+                _kokoroReady = ok
+                log(if (ok) "Kokoro TTS 就绪" else "Kokoro 初始化失败")
+            }
+            _kokoroDownloading = false; _kokoroProgress = ""
+        }
+    }
+
     // ===================== Media Capture =====================
 
     private fun requestMediaCapture() {
@@ -1017,11 +1180,16 @@ class MainActivity : ComponentActivity() {
         _paragraphAutoGroup = p.getBoolean("paragraph_auto_group", true)
         _paragraphMaxSegments = p.getInt("paragraph_max_segments", 8).coerceIn(1, 20)
         _paragraphSilenceMs = p.getInt("paragraph_silence_ms", 4000).coerceIn(1000, 10000)
+        _streamingAsrModelIdx = p.getInt("streaming_asr_model_idx", 0).coerceIn(0, SherpaStreamingAsr.StreamingModel.entries.size - 1)
+        _kokoroVoiceSid = p.getInt("kokoro_voice_sid", 0).coerceIn(0, KokoroTts.VOICES.last().first)
+        _zhTtsModelIdx = p.getInt("zh_tts_model_idx", 0).coerceIn(0, VitsTts.Model.entries.lastIndex)
+        _sherpaTtsSid = p.getInt("sherpa_tts_sid", 0)
     }
 
     private fun saveKey(k: String, v: String) { getSharedPreferences("vri_settings", Context.MODE_PRIVATE).edit().putString(k, v).apply() }
     private fun saveInt(k: String, v: Int) { getSharedPreferences("vri_settings", Context.MODE_PRIVATE).edit().putInt(k, v).apply() }
     private fun saveBool(k: String, v: Boolean) { getSharedPreferences("vri_settings", Context.MODE_PRIVATE).edit().putBoolean(k, v).apply() }
+    private fun saveFloat(k: String, v: Float) { getSharedPreferences("vri_settings", Context.MODE_PRIVATE).edit().putFloat(k, v).apply() }
     private fun selectedWhisperModel() = SherpaWhisperAsr.WhisperModel.entries[_whisperModelIdx]
 
     // ===================== Sentence Buffer =====================
@@ -1083,16 +1251,17 @@ class MainActivity : ComponentActivity() {
                 (_paragraphs.last().allDone && _paragraphs.last().segments.size >= _paragraphMaxSegments)
         }
         if (shouldCreateNewParagraph) {
-            _paragraphs.add(Paragraph(id = _nextParagraphId++))
+            paragraphsAdd(Paragraph(id = _nextParagraphId++))
         }
 
         val paraIdx = _paragraphs.lastIndex
         val para = _paragraphs[paraIdx]
         val seqId = translationPipeline.allocateSeqId()
         val newSeg = Segment(seqId = seqId, en = text, translating = true)
-        _paragraphs[paraIdx] = para.copy(segments = para.segments + newSeg)
+        val existingZh = para.segments.filter { it.zh.isNotBlank() }.size
+        paragraphsSet(paraIdx, para.copy(segments = para.segments + newSeg))
 
-        log("提交翻译 seq=$seqId: ${text.take(40)}")  // ← 关键日志
+        log("提交翻译 seq=$seqId pi=$paraIdx existZh=$existingZh totalSegs=${para.segments.size + 1}: ${text.take(40)}")
         translationHistory.appendPending(seqId, text)
         translationPipeline.submitSentence(seqId, para.id, text)
 
@@ -1107,7 +1276,7 @@ class MainActivity : ComponentActivity() {
                         if (lastPara.allDone) {
                             translationPipeline.closeParagraph(currentParaId)
                         }
-                        _paragraphs.add(Paragraph(id = _nextParagraphId++))
+                        paragraphsAdd(Paragraph(id = _nextParagraphId++))
                     }
                 }
             }
@@ -1236,31 +1405,32 @@ class MainActivity : ComponentActivity() {
             // Already on Main thread (pipeline uses withContext(Dispatchers.Main))
             for (pi in _paragraphs.indices) {
                 val para = _paragraphs[pi]
+                if (para.fromHistory) continue  // history segments have stale seqIds — skip
                 val si = para.segments.indexOfFirst { it.seqId == seqId }
                 if (si >= 0) {
                     val newSegs = para.segments.toMutableList()
                     newSegs[si] = newSegs[si].copy(zh = zh, translating = false)
-                    _paragraphs[pi] = para.copy(segments = newSegs)
-                    log("$en → $zh")
-                    translationHistory.updateZhBySeqId(seqId, zh)
-                    _historySessions.clear()
-                    _historySessions.addAll(translationHistory.allSessions())
+                    paragraphsSet(pi, para.copy(segments = newSegs))
+                    log("翻译完成 seq=$seqId pi=$pi: $en → $zh")
+                    // Update history on IO to avoid blocking Main thread / Compose recomposition
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        translationHistory.updateZhBySeqId(seqId, zh)
+                    }
                     return
                 }
             }
-            // Segment not found — translation result arrived but no matching UI segment.
-            // This can happen if clearAll() was called. Log and discard.
-            Log.w("VRI", "Translation result for seqId=$seqId not found in paragraphs")
+            Log.w("VRI", "翻译结果 seq=$seqId 未匹配段落 (paragraphs=${_paragraphs.size})")
         }
 
         override fun onTranslationError(seqId: Int, en: String, error: String) {
             for (pi in _paragraphs.indices) {
                 val para = _paragraphs[pi]
+                if (para.fromHistory) continue
                 val si = para.segments.indexOfFirst { it.seqId == seqId }
                 if (si >= 0) {
                     val newSegs = para.segments.toMutableList()
                     newSegs[si] = newSegs[si].copy(zh = "[翻译失败]", translating = false)
-                    _paragraphs[pi] = para.copy(segments = newSegs)
+                    paragraphsSet(pi, para.copy(segments = newSegs))
                     log("翻译失败: $error")
                     return
                 }
@@ -1291,15 +1461,16 @@ class MainActivity : ComponentActivity() {
             // SWR quality upgrade — update segment display without triggering TTS
             for (pi in _paragraphs.indices) {
                 val para = _paragraphs[pi]
+                if (para.fromHistory) continue
                 val si = para.segments.indexOfFirst { it.seqId == seqId }
                 if (si >= 0) {
                     val seg = para.segments[si]
                     val newSegs = para.segments.toMutableList()
                     newSegs[si] = seg.copy(qualityZh = zh, route = meta.route)
-                    _paragraphs[pi] = para.copy(segments = newSegs)
-                    translationHistory.upsertZhBySeqId(seqId, zh)
-                    _historySessions.clear()
-                    _historySessions.addAll(translationHistory.allSessions())
+                    paragraphsSet(pi, para.copy(segments = newSegs))
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        translationHistory.upsertZhBySeqId(seqId, zh)
+                    }
                     log("质量升级: ${en.take(20)} → ${zh.take(20)}")
                     return
                 }
@@ -1316,7 +1487,7 @@ class MainActivity : ComponentActivity() {
     }
     private fun clearAll() {
         paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
-        _paragraphs.clear(); _nextParagraphId = 0; _currentPartial = ""
+        paragraphsClear(); _nextParagraphId = 0; _currentPartial = ""
         if (::translationPipeline.isInitialized) translationPipeline.reset()
         log("已清空")
     }
@@ -1336,13 +1507,13 @@ class MainActivity : ComponentActivity() {
         translationHistory.switchToSession(sessionId)
         // 清空主界面并重建段落
         paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
-        _paragraphs.clear(); _nextParagraphId = 0; _currentPartial = ""
+        paragraphsClear(); _nextParagraphId = 0; _currentPartial = ""
         if (::translationPipeline.isInitialized) translationPipeline.reset()
         // 加载 entries：每条独立成一个段落卡片（保证按句显示，避免拼成长串）
         // 新录入的句子仍按用户聚合设置处理
         session.entries.forEach { e ->
             val seg = Segment(seqId = e.seqId, en = e.en, zh = e.zh, translating = false)
-            _paragraphs.add(Paragraph(
+            paragraphsAdd(Paragraph(
                 id = _nextParagraphId++, segments = listOf(seg), fromHistory = true
             ))
         }
@@ -1365,7 +1536,7 @@ class MainActivity : ComponentActivity() {
         translationHistory.flush()
         // 清空当前 UI 状态
         paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
-        _paragraphs.clear(); _nextParagraphId = 0; _currentPartial = ""
+        paragraphsClear(); _nextParagraphId = 0; _currentPartial = ""
         if (::translationPipeline.isInitialized) translationPipeline.reset()
         // 创建新会话并刷新列表
         translationHistory.newSession()
@@ -1385,7 +1556,7 @@ class MainActivity : ComponentActivity() {
         // 如删的是当前会话，清空 UI 与翻译流水线状态
         if (isCurrent) {
             paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
-            _paragraphs.clear(); _nextParagraphId = 0; _currentPartial = ""
+            paragraphsClear(); _nextParagraphId = 0; _currentPartial = ""
             if (::translationPipeline.isInitialized) translationPipeline.reset()
         }
         // 执行删除
@@ -1407,7 +1578,7 @@ class MainActivity : ComponentActivity() {
     private fun handleClearAllSessions() {
         if (_recording) { stopAllAsr(); log("已停止录音（因清空所有历史）") }
         paragraphSilenceJob?.cancel(); paragraphSilenceJob = null
-        _paragraphs.clear(); _nextParagraphId = 0; _currentPartial = ""
+        paragraphsClear(); _nextParagraphId = 0; _currentPartial = ""
         if (::translationPipeline.isInitialized) translationPipeline.reset()
         translationHistory.clearAll()
         translationHistory.newSession()
@@ -1416,9 +1587,9 @@ class MainActivity : ComponentActivity() {
         log("已清空所有历史")
     }
 
-    private fun asrReady() = when (_asrEngine) { 0 -> _systemAsrAvailable; 1 -> _voskReady; 2, 5 -> _openaiKey.isNotBlank(); 3 -> _groqKey.isNotBlank(); 4 -> _localWhisperReady; else -> false }
+    private fun asrReady() = when (_asrEngine) { 0 -> _systemAsrAvailable; 1 -> _voskReady; 2, 5 -> _openaiKey.isNotBlank(); 3 -> _groqKey.isNotBlank(); 4 -> _localWhisperReady; 6 -> _streamingAsrReady; else -> false }
     private fun asrLabel(): String {
-        val asr = when (_asrEngine) { 0 -> "系统识别"; 1 -> "Vosk"; 2 -> "OpenAI"; 3 -> "Groq"; 4 -> "Whisper ${selectedWhisperModel().label}"; 5 -> "GPT-4o"; else -> "" }
+        val asr = when (_asrEngine) { 0 -> "系统识别"; 1 -> "Vosk"; 2 -> "OpenAI"; 3 -> "Groq"; 4 -> "Whisper ${selectedWhisperModel().label}"; 5 -> "GPT-4o"; 6 -> "流式 ${selectedStreamingModel().label}"; else -> "" }
         val trans = when (_translationEngineType) { 0 -> "MLKit"; 1 -> "GPT"; 2 -> "Groq"; 3 -> "DeepL"; 4 -> "本地LLM"; 5 -> "Opus-MT"; 6 -> "NLLB"; else -> "" }
         val refine = if (_refineProvider > 0) " +润色" else ""
         return "$asr → $trans$refine"
@@ -1496,9 +1667,9 @@ class MainActivity : ComponentActivity() {
                                 // Load last session's entries into a paragraph
                                 val lastSession = translationHistory.currentSession()
                                 if (lastSession != null && lastSession.entries.isNotEmpty()) {
-                                    _paragraphs.clear()
+                                    paragraphsClear()
                                     val segs = lastSession.entries.map { e -> Segment(en = e.en, zh = e.zh, translating = false) }
-                                    _paragraphs.add(Paragraph(id = _nextParagraphId++, segments = segs))
+                                    paragraphsAdd(Paragraph(id = _nextParagraphId++, segments = segs))
                                 }
                             }) { Text("继续上次") }
                         }
@@ -1824,11 +1995,13 @@ class MainActivity : ComponentActivity() {
                 AsrOption(3, "Groq Whisper", "API · 免费额度")
                 AsrOption(4, "本地 Whisper", "离线 · 精度高")
                 AsrOption(5, "GPT-4o 语音", "OpenAI API · 高精度")
+                AsrOption(6, "Sherpa 流式离线", "Zipformer · 中英双语 · 推荐")
 
                 AnimatedVisibility(_asrEngine == 1) { VoskModelPanel() }
                 AnimatedVisibility(_asrEngine == 2 || _asrEngine == 5) { ApiKeyInput("OpenAI API Key", _openaiKey) { _openaiKey = it; saveKey("openai_key", it); invalidateTranslationCache() } }
                 AnimatedVisibility(_asrEngine == 3) { ApiKeyInput("Groq API Key", _groqKey) { _groqKey = it; saveKey("groq_key", it); invalidateTranslationCache() } }
                 AnimatedVisibility(_asrEngine == 4) { WhisperModelSelector() }
+                AnimatedVisibility(_asrEngine == 6) { StreamingAsrModelPanel() }
             }
 
             // 3) 翻译引擎
@@ -2169,6 +2342,7 @@ class MainActivity : ComponentActivity() {
                 TtsOption(1, "系统 TTS", "Google 系统语音")
                 TtsOption(2, "Google 翻译", "基础音质")
                 TtsOption(3, "OpenAI TTS", "高质量 · API")
+                TtsOption(4, "Sherpa 离线", "中文离线合成 · VITS/MeloTTS/Matcha")
                 AnimatedVisibility(_ttsEngine == 3) {
                     Column(Modifier.padding(start = 12.dp, top = 6.dp)) {
                         Text("语音角色", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
@@ -2189,6 +2363,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                AnimatedVisibility(_ttsEngine == 4) { KokoroTtsPanel() }
             }
 
             // 5) 音频设备
@@ -2981,6 +3156,177 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    private fun StreamingAsrModelPanel() {
+        Column(Modifier.padding(start = 4.dp, top = 6.dp)) {
+            Text("模型选择", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+            Spacer(Modifier.height(4.dp))
+
+            SherpaStreamingAsr.StreamingModel.entries.forEachIndexed { idx, m ->
+                val dl = streamingAsr.isModelDownloaded(m)
+                val sizeMB = if (dl) streamingAsr.modelSizeMB(m) else 0
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp))
+                        .clickable { switchStreamingAsrModel(idx) }
+                        .background(if (_streamingAsrModelIdx == idx) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f) else Color.Transparent)
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(_streamingAsrModelIdx == idx, { switchStreamingAsrModel(idx) }, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(m.label, fontSize = 13.sp, fontWeight = if (_streamingAsrModelIdx == idx) FontWeight.SemiBold else FontWeight.Normal)
+                        Text("${m.desc}" + if (dl) " · 已下载 (${sizeMB}MB)" else "",
+                            fontSize = 10.sp, color = if (dl) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f))
+                    }
+                    if (dl) {
+                        IconButton(onClick = {
+                            if (_recording && _asrEngine == 6 && _streamingAsrModelIdx == idx) {
+                                log("请先停止录音再删除模型")
+                            } else {
+                                streamingAsr.deleteModel(m)
+                                if (_streamingAsrModelIdx == idx) _streamingAsrReady = false
+                                log("已删除流式ASR ${m.label}")
+                            }
+                        }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.Delete, "删除", Modifier.size(16.dp), tint = Color(0xFFEF5350))
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+            val cur = selectedStreamingModel()
+            when {
+                _streamingAsrReady ->
+                    Text("${cur.label} 已就绪", fontSize = 13.sp, color = Color(0xFF4CAF50))
+                _streamingAsrDownloading -> {
+                    Text(_streamingAsrProgress.ifBlank { "下载中…" }, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.height(4.dp)); LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+                else ->
+                    Button(onClick = { downloadStreamingAsrModel() }, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)) {
+                        Icon(Icons.Default.Download, null, Modifier.size(14.dp)); Spacer(Modifier.width(4.dp))
+                        Text(if (streamingAsr.isModelDownloaded(cur)) "重新初始化" else "下载 ${cur.label} (~${cur.approxSizeMB}MB)", fontSize = 12.sp)
+                    }
+            }
+            Text("支持中英双语 · 无需 VAD · 实时输出", fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+
+    private var _sherpaTtsSid by mutableStateOf(0)
+
+    @Composable
+    private fun KokoroTtsPanel() {
+        Column(Modifier.padding(start = 4.dp, top = 6.dp)) {
+            val groups = VitsTts.Model.entries.groupBy { it.lang }
+            val langLabels = mapOf("zh" to "中文模型", "en" to "英文模型", "de" to "其他语言")
+
+            for ((lang, models) in groups) {
+                Text(langLabels[lang] ?: lang, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+
+                models.forEach { model ->
+                    val idx = model.ordinal
+                    val downloaded = vitsTts.isModelDownloaded(model)
+                    val active = _zhTtsModelIdx == idx && _vitsTtsReady && vitsTts.currentModelLabel() == model.label
+                    Row(Modifier.fillMaxWidth().clickable {
+                        _zhTtsModelIdx = idx; saveInt("zh_tts_model_idx", idx)
+                        if (downloaded) switchSherpaModel(model)
+                    }.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = _zhTtsModelIdx == idx, onClick = null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(model.label, fontSize = 12.sp,
+                                    color = if (active) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface)
+                                if (active) Text(" ●", fontSize = 8.sp, color = Color(0xFF4CAF50))
+                            }
+                            Text(buildString {
+                                append(model.engineType.name)
+                                if (model.speakers > 1) append(" · ${model.speakers}音色")
+                                append(" · ~${model.approxSizeMB}MB")
+                                if (downloaded) append(" · ✓")
+                            }, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f))
+                        }
+                        // Download / Delete buttons
+                        if (!downloaded && !model.isBuiltin) {
+                            TextButton(onClick = { downloadZhTtsModel(model) },
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) {
+                                Text("下载", fontSize = 10.sp)
+                            }
+                        } else if (downloaded && !model.isBuiltin) {
+                            TextButton(onClick = {
+                                vitsTts.deleteModel(model)
+                                if (active) _vitsTtsReady = false
+                                log("已删除 ${model.label}")
+                            }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) {
+                                Text("删除", fontSize = 10.sp, color = Color(0xFFEF5350))
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+            }
+
+            if (_zhTtsDownloading) {
+                Text(_zhTtsProgress.ifBlank { "下载中…" }, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 2.dp))
+            }
+
+            // Speaker ID (for multi-speaker models)
+            val curModel = selectedZhTtsModel()
+            if (_vitsTtsReady && curModel.speakers > 1) {
+                Spacer(Modifier.height(8.dp))
+                Text("音色 (Speaker ID: $_sherpaTtsSid / ${curModel.speakers - 1})", fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                Slider(
+                    value = _sherpaTtsSid.toFloat(),
+                    onValueChange = { _sherpaTtsSid = it.toInt(); saveInt("sherpa_tts_sid", _sherpaTtsSid) },
+                    valueRange = 0f..(curModel.speakers - 1).toFloat(),
+                    steps = (curModel.speakers - 2).coerceAtLeast(0),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+
+            Text("Sherpa-ONNX 离线合成 · VITS/Matcha/Kokoro/Kitten", fontSize = 9.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
+                modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+
+    private fun switchSherpaModel(model: VitsTts.Model) {
+        _vitsTtsReady = false
+        lifecycleScope.launch(Dispatchers.IO) {
+            val ok = vitsTts.initModel(model)
+            withContext(Dispatchers.Main) {
+                _vitsTtsReady = ok
+                log(if (ok) "${model.label} 就绪" else "${model.label} 初始化失败")
+            }
+        }
+    }
+
+    private fun downloadZhTtsModel(model: VitsTts.Model) {
+        if (_zhTtsDownloading) return
+        _zhTtsDownloading = true
+        lifecycleScope.launch {
+            val cb = object : VitsTts.Callback {
+                override fun onDownloadProgress(file: String, percent: Int) { _zhTtsProgress = "$file: $percent%" }
+                override fun onError(message: String) { log("下载: $message") }
+            }
+            if (vitsTts.downloadModel(model, cb)) {
+                val ok = withContext(Dispatchers.IO) { vitsTts.initModel(model) }
+                _vitsTtsReady = ok
+                log(if (ok) "${model.label} 就绪" else "${model.label} 初始化失败")
+            }
+            _zhTtsDownloading = false; _zhTtsProgress = ""
+        }
+    }
+
+    @Composable
     private fun OfflineTransModelPanel() {
         val model = if (_translationEngineType == 6) OnDeviceTranslationModel.NLLB_600M_INT8
                     else OnDeviceTranslationModel.OPUS_MT_EN_ZH
@@ -3303,15 +3649,18 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun ConversationArea(modifier: Modifier = Modifier) {
         val ls = rememberLazyListState()
-        val totalItems = _paragraphs.size + (if (_currentPartial.isNotBlank()) 1 else 0)
-        LaunchedEffect(totalItems, _paragraphs.lastOrNull()?.segments?.size) {
+        val paras = _paragraphs  // reading mutableStateOf triggers recomposition on any write
+        val totalItems = paras.size + (if (_currentPartial.isNotBlank()) 1 else 0)
+        LaunchedEffect(totalItems, paras) {
             if (totalItems > 0) ls.animateScrollToItem(totalItems - 1)
         }
         LazyColumn(state = ls, modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
-            items(_paragraphs.size) { ParagraphCard(_paragraphs[it]) }
+            items(items = paras, key = { it.id }) { para ->
+                ParagraphCard(para)
+            }
             if (_currentPartial.isNotBlank() && (_recording || _mediaCaptureActive)) {
                 item { PartialCard(_currentPartial) }
             }
