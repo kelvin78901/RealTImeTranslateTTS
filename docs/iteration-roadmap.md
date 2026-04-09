@@ -4,6 +4,12 @@
 > 基于：README 开发计划 + sherpa-onnx-analysis.md 可优化项
 > 日期：2026-04-04
 
+> v1.2.3 状态快照（2026-04-09）：
+> - ✅ Iter-1 核心能力已落地：`SherpaStreamingAsr`（流式 partial/final + endpoint）
+> - ✅ Iter-2 核心能力已落地：统一 `VitsTts`（VITS/Matcha/Kokoro/Kitten）
+> - ✅ Kokoro 升级到 multi-lang v1.1，并完成下载/初始化/音色接入
+> - ✅ 构建兼容性修复：Gradle 运行时固定 JDK 21，避免 JDK 25 触发构建失败
+
 ---
 
 ## 目录

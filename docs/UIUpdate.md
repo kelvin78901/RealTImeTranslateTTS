@@ -6,7 +6,7 @@
 
 ---
 
-## 实施状态（version 1.2.2）
+## 实施状态（version 1.2.3）
 
 ### ✅ 已完成（P0）
 
@@ -15,12 +15,15 @@
 - 历史会话交互升级：序号徽章、当前会话高亮、新建对话、删除/清空二次确认
 - 历史内容展示改为“按条目预览”，不再整段汇总
 - 历史会话支持点击进入具体内容（加载对应会话明细）
+- 流式 ASR 入口与状态接入（模型下载进度、就绪态、录音态）
+- 离线 TTS 面板升级为统一 Sherpa TTS 模型选择（VITS / Matcha / Kokoro / Kitten）
+- Kokoro 独立下载/初始化与中文音色选择接入
 
 ### 🚧 后续（P1/P2）
 
 - Meta 可解释面板（route/domain/glossary/fallback）
 - 悬浮窗与主界面状态语义进一步统一
-- Iter-1/4/5 占位组件（流式状态条、语种、说话人）
+- Iter-4/5 占位组件（语种、说话人）
 
 ---
 
@@ -268,5 +271,3 @@
 - `ui/components/SpeakerChip.kt`（Iter-5 占位）
 - `ui/screens/MeetingWorkspaceScreen.kt`（Iter-7 占位）
 - `ui/screens/AiAssistantPanel.kt`（Iter-6 占位）
-
-> 说明：当前文档是“设计与实施指导”，不直接修改现有代码；后续可按 P0→P1→P2 分批落地。

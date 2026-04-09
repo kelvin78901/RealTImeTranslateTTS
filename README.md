@@ -10,6 +10,10 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 
 ## 最新更新 / Latest Updates (2026-04)
 
+- **v1.2.3 发布**：新增 Sherpa 流式 ASR（Zipformer/Paraformer/CTC/NeMo 多模型可切换）
+- **本地 TTS 引擎升级**：统一 Sherpa 离线 TTS 管线（VITS / Matcha / Kokoro / Kitten）
+- **Kokoro 升级**：切换到 Kokoro multi-lang v1.1（含中文音色）
+- **构建稳定性修复**：Gradle 运行时固定 JDK 21，规避 JDK 25 解析异常
 - **SWR 双通道翻译**：支持“先快后优”升级显示（Fast Path + Quality Path）
 - **翻译上下文增强**：新增 `latencyMode`（实时/平衡/质量）、`background`（可选背景信息）、`domainHint`（领域提示）
 - **术语库系统升级**：内置领域词库 + 开源词库下载 + 用户自定义上传（CSV/TSV）
@@ -22,6 +26,9 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 
 ### ✅ 已完成 / Done
 - Iter-0（P0）UI 重构：三级设置菜单、段落聚合控制、历史会话交互升级
+- Iter-1（P0）流式 ASR：新增 Sherpa OnlineRecognizer（流式部分结果 + endpoint 最终结果）
+- Iter-2（P0）离线 TTS 升级：统一 Sherpa TTS 引擎并支持多模型切换
+- Kokoro multi-lang v1.1 接入完成（中文/英文可用，支持模型下载与初始化）
 - SWR 双通道翻译（先快后优）与“已优化”结果升级展示
 - 翻译上下文增强：`latencyMode` / `background` / `domainHint`
 - 领域词库路由：`auto/general/meeting/medical/customer_support/game`
@@ -56,6 +63,7 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 |------|------|
 | 系统 ASR | Android 原生语音识别，无需额外配置 |
 | Vosk（离线） | 本地离线英文语音识别，无需网络 |
+| Sherpa 流式 ASR（新增） | 基于 OnlineRecognizer，支持实时 partial + endpoint final，多模型可选 |
 | OpenAI Whisper API | 通过 OpenAI API 调用 Whisper，识别准确度高 |
 | Groq Whisper API | 通过 Groq API 调用 Whisper，速度快、延迟低 |
 | 本地 Whisper（Sherpa-ONNX） | 在设备端运行 Whisper ONNX 模型，完全离线，集成 Silero VAD |
@@ -93,7 +101,9 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 | Android 系统 TTS | 原生系统语音，无需网络 |
 | Google Translate TTS | 通过 Google 翻译语音接口合成 |
 | OpenAI TTS | 调用 OpenAI 语音合成 API |
-| Sherpa-ONNX 本地 TTS | 设备本地 VITS 模型，完全离线 |
+| Sherpa-ONNX 本地 TTS（升级） | 统一离线 TTS 管线，支持 VITS / Matcha / Kokoro / Kitten 多模型 |
+
+> 发布说明：详见 `docs/release-notes-v1.2.3.md`。
 
 ### 媒体音频转译
 通过 **MediaProjection API**（需 Android 10+）捕获系统媒体音频（视频、音乐、会议等），实时转录并翻译，无需接触麦克风。
