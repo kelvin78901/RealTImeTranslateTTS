@@ -47,7 +47,7 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 - 支持更多翻译增强功能（如上下文理解、术语注入、风格调整等）
 - 支持自定义音色和语速的 TTS 输出
 - 增加同步录音功能，方便会议记录和回放
-
+- 增加文本导出功能，支持将翻译结果以文本文件形式保存或分享
 
 ## 功能概览 / Features
 
