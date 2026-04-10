@@ -28,7 +28,9 @@ import kotlin.math.max
 class WhisperApiAsr(
     private val context: Context,
     private val apiKey: String,
-    private val provider: Provider = Provider.OPENAI
+    private val provider: Provider = Provider.OPENAI,
+    /** ISO 639-1 language hint for Whisper API (e.g. "en", "zh"). Empty = auto-detect. */
+    var language: String = "",
 ) {
     enum class Provider(val baseUrl: String, val model: String) {
         OPENAI("https://api.openai.com/v1/audio/transcriptions", "whisper-1"),
@@ -124,7 +126,20 @@ class WhisperApiAsr(
         if (vad != null) return true
         // Search for VAD model in shared location or any whisper model dir
         val vadFile = findVadFile(context) ?: return false
-        try {
+        for (providerName in com.example.myapplication1.AccelerationConfig.providerChain(context)) {
+            if (tryInitVad(vadFile, providerName)) {
+                Log.i(TAG, "Silero VAD initialized from: ${vadFile.absolutePath} (provider=$providerName)")
+                return true
+            }
+            if (providerName != com.example.myapplication1.AccelerationConfig.CPU) {
+                Log.w(TAG, "VAD init with provider=$providerName failed, falling back to CPU")
+            }
+        }
+        return false
+    }
+
+    private fun tryInitVad(vadFile: File, providerName: String): Boolean {
+        return try {
             val vadConfig = VadModelConfig().apply {
                 sileroVadModelConfig = SileroVadModelConfig(
                     model = vadFile.absolutePath,
@@ -136,14 +151,14 @@ class WhisperApiAsr(
                 )
                 sampleRate = SAMPLE_RATE
                 numThreads = 1
-                provider = "cpu"
+                provider = providerName
             }
             vad = Vad(null, vadConfig)
-            Log.i(TAG, "Silero VAD initialized from: ${vadFile.absolutePath}")
-            return true
+            true
         } catch (e: Throwable) {
-            Log.e(TAG, "VAD init failed: ${e.message}")
-            return false
+            Log.e(TAG, "VAD init failed (provider=$providerName): ${e.message}")
+            vad = null
+            false
         }
     }
 
@@ -350,7 +365,7 @@ class WhisperApiAsr(
                     wav.toRequestBody("audio/wav".toMediaType())
                 )
                 .addFormDataPart("model", provider.model)
-                .addFormDataPart("language", "en")
+                .apply { if (language.isNotBlank()) addFormDataPart("language", language) }
                 .addFormDataPart("response_format", "json")
                 .build()
 

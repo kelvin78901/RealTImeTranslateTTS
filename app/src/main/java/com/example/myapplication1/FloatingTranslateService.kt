@@ -383,7 +383,10 @@ class FloatingTranslateService : Service() {
             } catch (_: Throwable) {}
             audioRecord?.startRecording()
         } catch (e: Throwable) { updatePartial("录音失败"); return }
-        recognizer?.close(); recognizer = Recognizer(voskModel, sr.toFloat())
+        recognizer?.close()
+        val localRec = Recognizer(voskModel, sr.toFloat())
+        recognizer = localRec
+        val localAudio = audioRecord ?: return
         recording = true
         updateMicIcon(true)
         updatePartial("正在听…")
@@ -391,13 +394,14 @@ class FloatingTranslateService : Service() {
         asrJob = scope.launch(Dispatchers.IO) {
             val buf = ShortArray(2048)
             while (isActive && recording) {
-                val n = audioRecord?.read(buf, 0, buf.size) ?: break; if (n <= 0) continue
+                val n = try { localAudio.read(buf, 0, buf.size) } catch (_: Throwable) { break }
+                if (n <= 0) { if (n < 0) break else continue }
                 try {
-                    if (recognizer?.acceptWaveForm(buf, n) == true) {
-                        val t = JSONObject(recognizer!!.result).optString("text").trim()
+                    if (localRec.acceptWaveForm(buf, n)) {
+                        val t = JSONObject(localRec.result).optString("text").trim()
                         if (t.isNotBlank()) withContext(Dispatchers.Main) { onAsrResult(t) }
                     } else {
-                        val p = JSONObject(recognizer!!.partialResult).optString("partial").trim()
+                        val p = JSONObject(localRec.partialResult).optString("partial").trim()
                         if (p.isNotBlank()) withContext(Dispatchers.Main) {
                             updatePartial(p)
                         }

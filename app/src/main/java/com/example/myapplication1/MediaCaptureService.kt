@@ -83,11 +83,13 @@ class MediaCaptureService : Service() {
                     startCapture(resultCode, data)
                 } else {
                     reportError("媒体投影数据为空")
+                    stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }
             }
             ACTION_STOP -> {
                 stopCapture()
+                stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
         }
@@ -126,6 +128,7 @@ class MediaCaptureService : Service() {
         if (isCapturing) return
         if (Build.VERSION.SDK_INT < 29) {
             reportError("需要 Android 10+")
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
         }
@@ -135,11 +138,13 @@ class MediaCaptureService : Service() {
             mediaProjection = mgr.getMediaProjection(resultCode, data)
             if (mediaProjection == null) {
                 reportError("无法获取媒体投影")
+                stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return
             }
         } catch (e: Throwable) {
             reportError("媒体投影失败: ${e.message}")
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
         }
@@ -159,6 +164,9 @@ class MediaCaptureService : Service() {
 
         if (audioRecord == null) {
             reportError("无法创建音频录制，设备可能不支持媒体音频捕获")
+            try { mediaProjection?.stop() } catch (_: Throwable) {}
+            mediaProjection = null
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
         }
@@ -168,6 +176,9 @@ class MediaCaptureService : Service() {
         } catch (e: Throwable) {
             reportError("录制启动失败: ${e.message}")
             releaseAudioRecord()
+            try { mediaProjection?.stop() } catch (_: Throwable) {}
+            mediaProjection = null
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
         }

@@ -25,7 +25,11 @@ data class TranslationContext(
     /** Glossary terms (EN→ZH) injected from the active domain glossary. */
     val glossaryTerms: Map<String, String> = emptyMap(),
     /** Desired latency vs quality trade-off. */
-    val latencyMode: LatencyMode = LatencyMode.REALTIME
+    val latencyMode: LatencyMode = LatencyMode.REALTIME,
+    /** Source language ISO 639-1 code (e.g. "en", "zh"). Used by Iter-4 bidirectional translation. */
+    val sourceLang: String = "en",
+    /** Target language ISO 639-1 code. */
+    val targetLang: String = "zh",
 )
 
 /**

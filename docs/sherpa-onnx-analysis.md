@@ -3,6 +3,11 @@
 > 分析日期：2026-04-04
 > sherpa-onnx 版本：1.12.35
 > 源码路径：`/Users/kelvin/Downloads/sherpa-onnx-master`
+>
+> 落地状态补充（v1.2.3 / 2026-04-10）：
+> - 已落地：流式 ASR（Iter-1）、统一离线 TTS（Iter-2）、Kokoro v1.1
+> - 已落地：统一推理加速配置 `AccelerationConfig`（CPU/NNAPI/XNNPACK）
+> - 已落地：优选后端失败自动回退 CPU（Sherpa 模块与 OnDeviceTranslation）
 
 ---
 

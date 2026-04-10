@@ -13,6 +13,8 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 - **v1.2.3 发布**：新增 Sherpa 流式 ASR（Zipformer/Paraformer/CTC/NeMo 多模型可切换）
 - **本地 TTS 引擎升级**：统一 Sherpa 离线 TTS 管线（VITS / Matcha / Kokoro / Kitten）
 - **Kokoro 升级**：切换到 Kokoro multi-lang v1.1（含中文音色）
+- **GPU/NPU 加速设置落地**：新增 ONNX Provider 切换（CPU / NNAPI / XNNPACK）
+- **加速回退策略落地**：统一 Provider 链（优选加速后端失败时自动回退 CPU）
 - **构建稳定性修复**：Gradle 运行时固定 JDK 21，规避 JDK 25 解析异常
 - **SWR 双通道翻译**：支持“先快后优”升级显示（Fast Path + Quality Path）
 - **翻译上下文增强**：新增 `latencyMode`（实时/平衡/质量）、`background`（可选背景信息）、`domainHint`（领域提示）
@@ -28,6 +30,8 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 - Iter-0（P0）UI 重构：三级设置菜单、段落聚合控制、历史会话交互升级
 - Iter-1（P0）流式 ASR：新增 Sherpa OnlineRecognizer（流式部分结果 + endpoint 最终结果）
 - Iter-2（P0）离线 TTS 升级：统一 Sherpa TTS 引擎并支持多模型切换
+- ONNX Runtime Provider 统一配置：`AccelerationConfig`（`cpu`/`nnapi`/`xnnpack`）
+- 加速切换安全重载：设置切换后释放并重建 ASR/TTS/离线翻译相关模型
 - Kokoro multi-lang v1.1 接入完成（中文/英文可用，支持模型下载与初始化）
 - SWR 双通道翻译（先快后优）与“已优化”结果升级展示
 - 翻译上下文增强：`latencyMode` / `background` / `domainHint`
@@ -118,6 +122,7 @@ An Android app for real-time speech recognition, translation, and text-to-speech
 - **智能 ASR 过滤**：过滤填充词、噪声、音乐干扰、回声等
 - **延迟指标面板**：实时显示 ASR / 翻译 / 润色 / TTS 各阶段耗时
 - **设备状态监控**：CPU、内存、电量、温度
+- **推理加速开关**：高级设置支持 CPU/NNAPI/XNNPACK 切换，并自动回退到可用后端
 - **API 连通性测试**：一键测试所有已配置 API
 - **音频设备选择**：可指定输入 / 输出音频设备
 
@@ -147,6 +152,7 @@ MainActivity               ← 主界面（Jetpack Compose）
 │   └── TranslationRefiner (可选 LLM 润色)
 ├── TTS Consumer
 │   └── EdgeTts / SystemTts / GoogleTts / OpenAiTts / SherpaOnnxTts
+├── AccelerationConfig     ← ONNX Provider 统一配置与回退链（CPU/NNAPI/XNNPACK）
 ├── MediaCaptureService    ← 前台服务，系统音频捕获 + Vosk ASR
 └── FloatingTranslateService ← 前台服务，后台悬浮翻译窗口
 ```

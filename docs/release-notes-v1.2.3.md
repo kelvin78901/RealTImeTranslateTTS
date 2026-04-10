@@ -47,6 +47,19 @@
 	- `org.gradle.java.home=/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home`
 - 目的：规避 JDK 25 下 Kotlin/Gradle 脚本解析异常（`JavaVersion.parse(25)`）。
 
+### 6) GPU / NPU 加速（本次已闭环）
+
+- 新增统一 Provider 配置中心：`app/src/main/java/com/example/myapplication1/AccelerationConfig.kt`
+- 支持三种 ONNX Runtime 后端：
+	- `cpu`（默认）
+	- `nnapi`（Android 8.1+，可由系统调度到 NPU/GPU/DSP）
+	- `xnnpack`（高性能 CPU 后端）
+- 加速切换在设置页已可用（Advanced -> GPU/NPU 加速）。
+- 切换后会释放并重载已初始化模型，避免“UI已切换但模型仍旧后端”问题。
+- 关键模块引入统一回退链：优选后端初始化失败时自动回退 CPU。
+
+> 说明：`OnDeviceTranslation` 已支持 `addNnapi()` / `addXnnpack(...)`，并在会话创建失败时自动切回 CPU。
+
 ---
 
 ## 变更文件（核心）
@@ -55,6 +68,7 @@
 - `app/src/main/java/com/example/myapplication1/tts/VitsTts.kt`（新增）
 - `app/src/main/java/com/example/myapplication1/tts/KokoroTts.kt`（新增/升级）
 - `app/src/main/java/com/example/myapplication1/MainActivity.kt`（联动接入）
+- `app/src/main/java/com/example/myapplication1/AccelerationConfig.kt`（新增，统一 Provider 配置）
 - `app/build.gradle.kts`（音频能力相关依赖/兼容配置）
 - `gradle.properties`（JDK 21 固定）
 
@@ -71,6 +85,7 @@
 ### 验证结果（本次发布前）
 
 - ✅ `:app:compileDebugKotlin` 编译通过
+- ✅ Provider 链路检查通过：设置切换 -> 有效 provider 回读 -> 引擎重载 -> 模型初始化回退
 - ⚠️ 已知非阻断项：`third_party/espeak-ng` 目录仍可能显示 untracked content（不影响本次功能与编译）
 
 ---

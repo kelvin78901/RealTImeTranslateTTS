@@ -18,6 +18,8 @@
 - 流式 ASR 入口与状态接入（模型下载进度、就绪态、录音态）
 - 离线 TTS 面板升级为统一 Sherpa TTS 模型选择（VITS / Matcha / Kokoro / Kitten）
 - Kokoro 独立下载/初始化与中文音色选择接入
+- Advanced 页面新增 GPU/NPU 加速分组（CPU / NNAPI / XNNPACK）
+- Provider 切换联动引擎重载（防止切换后旧模型仍占用旧后端）
 
 ### 🚧 后续（P1/P2）
 

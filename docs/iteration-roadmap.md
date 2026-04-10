@@ -8,6 +8,8 @@
 > - ✅ Iter-1 核心能力已落地：`SherpaStreamingAsr`（流式 partial/final + endpoint）
 > - ✅ Iter-2 核心能力已落地：统一 `VitsTts`（VITS/Matcha/Kokoro/Kitten）
 > - ✅ Kokoro 升级到 multi-lang v1.1，并完成下载/初始化/音色接入
+> - ✅ 统一推理加速配置：`AccelerationConfig`（CPU/NNAPI/XNNPACK）
+> - ✅ 加速失败自动回退：Sherpa 模块与离线翻译均支持回退 CPU
 > - ✅ 构建兼容性修复：Gradle 运行时固定 JDK 21，避免 JDK 25 触发构建失败
 
 ---

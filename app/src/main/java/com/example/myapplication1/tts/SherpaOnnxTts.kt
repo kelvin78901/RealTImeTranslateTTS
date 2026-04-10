@@ -27,6 +27,20 @@ class SherpaOnnxTts(
     fun isReady() = ready
 
     fun init(): Boolean {
+        for (providerName in com.example.myapplication1.AccelerationConfig.providerChain(context)) {
+            if (tryInit(providerName)) {
+                Log.i(TAG, "✅ Sherpa-ONNX TTS 初始化成功 (provider=$providerName, sr=$sampleRate)")
+                return true
+            }
+            if (providerName != com.example.myapplication1.AccelerationConfig.CPU) {
+                Log.w(TAG, "Sherpa-ONNX TTS init with provider=$providerName failed, falling back to CPU")
+            }
+        }
+        ready = false
+        return false
+    }
+
+    private fun tryInit(providerName: String): Boolean {
         try {
             tryLoadSherpaJni()
 
@@ -46,10 +60,6 @@ class SherpaOnnxTts(
             val clsOfflineTtsConfig = Class.forName("com.k2fsa.sherpa.onnx.OfflineTtsConfig")
             val clsOfflineTtsModelConfig = Class.forName("com.k2fsa.sherpa.onnx.OfflineTtsModelConfig")
             val clsVits = Class.forName("com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig")
-
-            logConstructors("OfflineTts", clsOfflineTts)
-            logConstructors("OfflineTtsConfig", clsOfflineTtsConfig)
-            logConstructors("OfflineTtsVitsModelConfig", clsVits)
 
             // ---------- 先构建“文件模式”的 Config ----------
             val vitsFileCfg = newNoArg(clsVits)?.also {
@@ -84,7 +94,7 @@ class SherpaOnnxTts(
             val ttsFileCfg =
                 newNoArg(clsOfflineTtsConfig)?.also {
                     setByName(it, "model", modelFileCfg)
-                    setByName(it, "provider", "cpu")
+                    setByName(it, "provider", providerName)
                     setByName(it, "numThreads", 2)
                     setByName(it, "debugPath", "")
                 } ?: newByExactCtorOrNull(
@@ -94,7 +104,7 @@ class SherpaOnnxTts(
                         String::class.java, String::class.java,
                         java.lang.Integer.TYPE, java.lang.Float.TYPE
                     ),
-                    arrayOf(modelFileCfg, "cpu", "", 2, 1.0f)
+                    arrayOf(modelFileCfg, providerName, "", 2, 1.0f)
                 ) ?: error("无法创建 OfflineTtsConfig（文件模式）")
 
             // ---------- 优先使用“文件模式”：AssetManager 传 null ----------
@@ -103,10 +113,10 @@ class SherpaOnnxTts(
                 ttsObj = ctor.newInstance(null, ttsFileCfg) // ★ 关键：assetManager=null → 走绝对路径读取
                 sampleRate = (findZeroArgMethod(clsOfflineTts, "getSampleRate")?.invoke(ttsObj) as? Int) ?: 22050
                 ready = true
-                Log.i(TAG, "✅ Sherpa-ONNX TTS 文件模式初始化成功，sr=$sampleRate")
+                Log.i(TAG, "Sherpa-ONNX TTS 文件模式构造成功 (provider=$providerName, sr=$sampleRate)")
                 return true
             } catch (e: Throwable) {
-                Log.w(TAG, "文件模式构造失败，切换资产模式重试：${e.message}")
+                Log.w(TAG, "文件模式构造失败 (provider=$providerName)，切换资产模式重试：${e.message}")
             }
 
             // ---------- 资产模式兜底：路径改为 assets 相对路径 + 传入非空 AssetManager ----------
@@ -141,7 +151,7 @@ class SherpaOnnxTts(
             val ttsAssetCfg =
                 newNoArg(clsOfflineTtsConfig)?.also {
                     setByName(it, "model", modelAssetCfg)
-                    setByName(it, "provider", "cpu")
+                    setByName(it, "provider", providerName)
                     setByName(it, "numThreads", 2)
                     setByName(it, "debugPath", "")
                 } ?: newByExactCtorOrNull(
@@ -151,18 +161,19 @@ class SherpaOnnxTts(
                         String::class.java, String::class.java,
                         java.lang.Integer.TYPE, java.lang.Float.TYPE
                     ),
-                    arrayOf(modelAssetCfg, "cpu", "", 2, 1.0f)
+                    arrayOf(modelAssetCfg, providerName, "", 2, 1.0f)
                 ) ?: error("无法创建 OfflineTtsConfig（资产模式）")
 
             ttsObj = ctor.newInstance(context.assets, ttsAssetCfg)
             sampleRate = (findZeroArgMethod(clsOfflineTts, "getSampleRate")?.invoke(ttsObj) as? Int) ?: 22050
             ready = true
-            Log.i(TAG, "✅ Sherpa-ONNX TTS 资产模式初始化成功，sr=$sampleRate")
+            Log.i(TAG, "Sherpa-ONNX TTS 资产模式构造成功 (provider=$providerName, sr=$sampleRate)")
             return true
 
         } catch (t: Throwable) {
-            Log.e(TAG, "❌ 初始化失败: ${t.message}", t)
+            Log.e(TAG, "Sherpa-ONNX TTS 初始化失败 (provider=$providerName): ${t.message}", t)
             ready = false
+            ttsObj = null
             return false
         }
     }

@@ -2,6 +2,8 @@
 
 > 目的：针对最新代码检查中发现的“优译链路未完全闭环”问题，给出可执行修复方案与验收标准。  
 > 范围：`MainActivity`、`FloatingTranslateService`、`TranslationPipeline`、`TranslationHistory`、`GlossaryManager`。
+>
+> 兼容性注记（v1.2.3 / 2026-04-10）：项目已新增统一 ONNX 推理后端配置（CPU/NNAPI/XNNPACK）与自动回退链，SWR 链路可复用该基础设施以降低设备差异导致的波动。
 
 ---
 

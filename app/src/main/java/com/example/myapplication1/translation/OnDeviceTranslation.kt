@@ -100,17 +100,59 @@ class OnDeviceTranslation(
 
         try {
             val env = getEnv()
-            val opts = OrtSession.SessionOptions().apply {
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-                setIntraOpNumThreads(4)
+            val preferred = com.example.myapplication1.AccelerationConfig.provider(context)
+
+            // Build session options for a given provider; returns null if that EP
+            // cannot be attached (e.g. NNAPI stub present but driver missing).
+            fun buildOpts(provider: String): OrtSession.SessionOptions? = try {
+                OrtSession.SessionOptions().apply {
+                    setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                    setIntraOpNumThreads(4)
+                    when (provider) {
+                        com.example.myapplication1.AccelerationConfig.NNAPI -> addNnapi()
+                        com.example.myapplication1.AccelerationConfig.XNNPACK -> addXnnpack(emptyMap())
+                        else -> { /* default CPU path */ }
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "Cannot attach provider=$provider: ${e.message}")
+                null
             }
 
-            Log.i(TAG, "Loading encoder...")
-            encoderSession = env.createSession(File(dir, "encoder.onnx").absolutePath, opts)
-            Log.i(TAG, "Encoder loaded. Inputs: ${encoderSession!!.inputNames}")
+            // Load both sessions with the same provider. If the preferred one fails,
+            // release any partial state and retry with CPU.
+            var actualProvider = preferred
+            var opts = buildOpts(preferred)
+            if (opts == null && preferred != com.example.myapplication1.AccelerationConfig.CPU) {
+                actualProvider = com.example.myapplication1.AccelerationConfig.CPU
+                opts = buildOpts(actualProvider)
+            }
+            opts ?: throw Exception("Unable to build OrtSession options")
 
-            Log.i(TAG, "Loading decoder...")
-            decoderSession = env.createSession(File(dir, "decoder.onnx").absolutePath, opts)
+            Log.i(TAG, "Loading encoder with provider=$actualProvider...")
+            encoderSession = try {
+                env.createSession(File(dir, "encoder.onnx").absolutePath, opts)
+            } catch (e: Throwable) {
+                if (actualProvider == com.example.myapplication1.AccelerationConfig.CPU) throw e
+                Log.w(TAG, "Encoder load with $actualProvider failed, retrying CPU: ${e.message}")
+                actualProvider = com.example.myapplication1.AccelerationConfig.CPU
+                opts = buildOpts(actualProvider) ?: throw e
+                env.createSession(File(dir, "encoder.onnx").absolutePath, opts)
+            }
+            Log.i(TAG, "Encoder loaded (provider=$actualProvider). Inputs: ${encoderSession!!.inputNames}")
+
+            Log.i(TAG, "Loading decoder with provider=$actualProvider...")
+            decoderSession = try {
+                env.createSession(File(dir, "decoder.onnx").absolutePath, opts)
+            } catch (e: Throwable) {
+                if (actualProvider == com.example.myapplication1.AccelerationConfig.CPU) throw e
+                Log.w(TAG, "Decoder load with $actualProvider failed, retrying CPU: ${e.message}")
+                try { encoderSession?.close() } catch (_: Throwable) {}
+                actualProvider = com.example.myapplication1.AccelerationConfig.CPU
+                opts = buildOpts(actualProvider) ?: throw e
+                encoderSession = env.createSession(File(dir, "encoder.onnx").absolutePath, opts)
+                env.createSession(File(dir, "decoder.onnx").absolutePath, opts)
+            }
             val decInputNames = decoderSession!!.inputNames
             Log.i(TAG, "Decoder loaded. Inputs: $decInputNames")
 
@@ -150,7 +192,7 @@ class OnDeviceTranslation(
 
             initialized = true
             initError = null
-            Log.i(TAG, "Model ${model.label} initialized (beamSize=${model.defaultBeamSize})")
+            Log.i(TAG, "Model ${model.label} initialized (beamSize=${model.defaultBeamSize}, provider=$actualProvider)")
             return true
         } catch (e: Throwable) {
             initError = "初始化失败: ${e.message}"

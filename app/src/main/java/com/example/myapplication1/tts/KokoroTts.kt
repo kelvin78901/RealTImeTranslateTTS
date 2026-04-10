@@ -220,6 +220,20 @@ class KokoroTts(private val context: Context) {
 
     fun initModel(): Boolean {
         if (ready) return true
+        for (provider in com.example.myapplication1.AccelerationConfig.providerChain(context)) {
+            if (tryInitModel(provider)) {
+                Log.i(TAG, "Kokoro initialized, sr=${tts!!.sampleRate()}, speakers=${tts!!.numSpeakers()} (provider=$provider)")
+                return true
+            }
+            if (provider != com.example.myapplication1.AccelerationConfig.CPU) {
+                Log.w(TAG, "Kokoro init with provider=$provider failed, falling back to CPU")
+            }
+        }
+        ready = false
+        return false
+    }
+
+    private fun tryInitModel(provider: String): Boolean {
         val dir = File(context.filesDir, DIR_NAME)
         return try {
             val espeakDir = File(dir, "espeak-ng-data")
@@ -244,16 +258,16 @@ class KokoroTts(private val context: Context) {
             val ttsConfig = OfflineTtsConfig(
                 model = OfflineTtsModelConfig(
                     kokoro = kokoroConfig, numThreads = 2,
-                    debug = false, provider = "cpu",
+                    debug = false, provider = provider,
                 ),
             )
             tts = OfflineTts(null, ttsConfig)
             ready = true
-            Log.i(TAG, "Kokoro initialized, sr=${tts!!.sampleRate()}, speakers=${tts!!.numSpeakers()}")
             true
         } catch (e: Throwable) {
-            Log.e(TAG, "Init failed: ${e.message}", e)
-            ready = false
+            Log.e(TAG, "Init failed (provider=$provider): ${e.message}", e)
+            try { tts?.release() } catch (_: Throwable) {}
+            tts = null
             false
         }
     }

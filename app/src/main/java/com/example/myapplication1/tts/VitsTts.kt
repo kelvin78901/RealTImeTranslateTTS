@@ -168,19 +168,34 @@ class VitsTts(private val context: Context) {
             return false
         }
 
+        for (provider in com.example.myapplication1.AccelerationConfig.providerChain(context)) {
+            if (tryInitModel(model, provider)) {
+                Log.i(TAG, "${model.label} initialized, sr=${tts!!.sampleRate()}, speakers=${tts!!.numSpeakers()} (provider=$provider)")
+                return true
+            }
+            if (provider != com.example.myapplication1.AccelerationConfig.CPU) {
+                Log.w(TAG, "${model.label} init with provider=$provider failed, falling back to CPU")
+            }
+        }
+        ready = false
+        return false
+    }
+
+    private fun tryInitModel(model: Model, provider: String): Boolean {
         return try {
-            val config = buildConfig(model)
+            val config = buildConfig(model, provider)
             tts = if (model.isBuiltin) OfflineTts(context.assets, config) else OfflineTts(null, config)
             currentModel = model; ready = true
-            Log.i(TAG, "${model.label} initialized, sr=${tts!!.sampleRate()}, speakers=${tts!!.numSpeakers()}")
             true
         } catch (e: Throwable) {
-            Log.e(TAG, "${model.label} init failed: ${e.message}", e)
-            ready = false; false
+            Log.e(TAG, "${model.label} init failed (provider=$provider): ${e.message}", e)
+            try { tts?.release() } catch (_: Throwable) {}
+            tts = null
+            false
         }
     }
 
-    private fun buildConfig(m: Model): OfflineTtsConfig {
+    private fun buildConfig(m: Model, provider: String): OfflineTtsConfig {
         val dir = if (m.isBuiltin) m.dirName else File(context.filesDir, m.dirName).absolutePath
         fun p(name: String) = if (m.isBuiltin) "$dir/$name" else "$dir/$name"
         fun exists(name: String) = if (m.isBuiltin) true else File("$dir/$name").exists()
@@ -200,7 +215,7 @@ class VitsTts(private val context: Context) {
                     model = p(m.modelFile), lexicon = lexicon,
                     tokens = p("tokens.txt"), dataDir = espeakDir, dictDir = dictDir,
                 ),
-                numThreads = 2, debug = false, provider = "cpu",
+                numThreads = 2, debug = false, provider = provider,
             )
             EngineType.MATCHA -> OfflineTtsModelConfig(
                 matcha = OfflineTtsMatchaModelConfig(
@@ -208,7 +223,7 @@ class VitsTts(private val context: Context) {
                     lexicon = lexicon, tokens = p("tokens.txt"),
                     dataDir = espeakDir, dictDir = dictDir,
                 ),
-                numThreads = 2, debug = false, provider = "cpu",
+                numThreads = 2, debug = false, provider = provider,
             )
             EngineType.KOKORO -> OfflineTtsModelConfig(
                 kokoro = OfflineTtsKokoroModelConfig(
@@ -216,14 +231,14 @@ class VitsTts(private val context: Context) {
                     tokens = p("tokens.txt"), dataDir = espeakDir,
                     lexicon = lexicon, dictDir = dictDir,
                 ),
-                numThreads = 2, debug = false, provider = "cpu",
+                numThreads = 2, debug = false, provider = provider,
             )
             EngineType.KITTEN -> OfflineTtsModelConfig(
                 kitten = OfflineTtsKittenModelConfig(
                     model = p(m.modelFile), voices = p("voices.bin"),
                     tokens = p("tokens.txt"), dataDir = espeakDir,
                 ),
-                numThreads = 2, debug = false, provider = "cpu",
+                numThreads = 2, debug = false, provider = provider,
             )
         }
         return OfflineTtsConfig(model = modelConfig, ruleFsts = fstPaths)

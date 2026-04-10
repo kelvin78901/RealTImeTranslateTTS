@@ -35,10 +35,20 @@ abstract class TranslationEngine {
  * Shared system prompt for simultaneous interpreting.
  * Concise and deterministic: low temperature + brief output instruction.
  */
-private const val SI_SYSTEM_PROMPT =
-    "你是专业同声传译员（英译中）。" +
-    "请将用户输入的英文直接翻译为地道、简洁的中文。" +
-    "只输出翻译结果，不得包含任何解释、标注或额外标点。"
+private val LANG_NAMES = mapOf(
+    "en" to "英文", "zh" to "中文", "ja" to "日语", "ko" to "韩语",
+    "fr" to "法语", "de" to "德语", "es" to "西班牙语", "ru" to "俄语",
+    "pt" to "葡萄牙语", "it" to "意大利语", "ar" to "阿拉伯语",
+)
+
+/** Build dynamic system prompt based on source/target language pair. */
+private fun buildSiSystemPrompt(src: String, tgt: String): String {
+    val srcName = LANG_NAMES[src] ?: src
+    val tgtName = LANG_NAMES[tgt] ?: tgt
+    return "你是专业同声传译员（${srcName}译${tgtName}）。" +
+        "请将用户输入的${srcName}直接翻译为地道、简洁的${tgtName}。" +
+        "只输出翻译结果，不得包含任何解释、标注或额外标点。"
+}
 
 /**
  * MLKit offline translation (EN→ZH).
@@ -91,7 +101,7 @@ class LLMTranslation(
     override suspend fun translate(text: String): String = translate(text, TranslationContext())
 
     override suspend fun translate(text: String, context: TranslationContext): String = withContext(Dispatchers.IO) {
-        val systemPrompt = buildContextPrompt(SI_SYSTEM_PROMPT, context)
+        val systemPrompt = buildContextPrompt(buildSiSystemPrompt(context.sourceLang, context.targetLang), context)
 
         val json = JSONObject().apply {
             put("model", model)
@@ -143,7 +153,7 @@ class LocalServerTranslation(
 
     override suspend fun translate(text: String, context: TranslationContext): String = withContext(Dispatchers.IO) {
         val url = serverUrl.trimEnd('/') + "/chat/completions"
-        val systemPrompt = buildContextPrompt(SI_SYSTEM_PROMPT, context)
+        val systemPrompt = buildContextPrompt(buildSiSystemPrompt(context.sourceLang, context.targetLang), context)
 
         val json = JSONObject().apply {
             put("model", model)
@@ -190,8 +200,8 @@ class DeepLTranslation(private val apiKey: String) : TranslationEngine() {
         val base = if (apiKey.endsWith(":fx")) "https://api-free.deepl.com" else "https://api.deepl.com"
         val formBuilder = FormBody.Builder()
             .add("text", text)
-            .add("source_lang", "EN")
-            .add("target_lang", "ZH")
+            .add("source_lang", context.sourceLang.uppercase())
+            .add("target_lang", deeplTargetCode(context.targetLang))
 
         // DeepL context parameter: additional context for disambiguation (not billed)
         if (context.background.isNotBlank()) {
@@ -231,6 +241,11 @@ class DeepLTranslation(private val apiKey: String) : TranslationEngine() {
  * Augment a base system prompt with optional background context and glossary terms.
  * Returns the original prompt unmodified if context has nothing to add.
  */
+/** Map ISO 639-1 to DeepL target language codes (some require regional variants). */
+private fun deeplTargetCode(lang: String): String = when (lang) {
+    "en" -> "EN-US"; "pt" -> "PT-BR"; "zh" -> "ZH"; else -> lang.uppercase()
+}
+
 internal fun buildContextPrompt(base: String, context: TranslationContext): String {
     if (context.background.isBlank() && context.glossaryTerms.isEmpty()) return base
     return buildString {

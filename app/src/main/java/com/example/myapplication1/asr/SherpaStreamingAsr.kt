@@ -152,7 +152,17 @@ class SherpaStreamingAsr(private val context: Context) {
         fun onStateChanged(ready: Boolean)
         fun onDownloadProgress(file: String, percent: Int)
         fun onError(message: String)
+        /** Called when language is detected from first ~3s of audio. */
+        fun onLanguageDetected(lang: String) {}
     }
+
+    // ---- Iter-3: Speech denoiser ----
+    var speechEnhancer: SpeechEnhancer? = null
+    @Volatile var denoiserEnabled = false
+
+    // ---- Iter-4: Language detection ----
+    var languageDetector: LanguageDetector? = null
+    @Volatile var languageDetectionEnabled = false
 
     @Volatile private var recording = false
     private var recognizer: OnlineRecognizer? = null
@@ -243,6 +253,20 @@ class SherpaStreamingAsr(private val context: Context) {
         if (currentModel == model && modelReady) return true
         if (currentModel != model) release()
 
+        for (provider in com.example.myapplication1.AccelerationConfig.providerChain(context)) {
+            if (tryInitModel(model, provider)) {
+                Log.i(TAG, "Streaming ASR [${model.label}] initialized (provider=$provider)")
+                return true
+            }
+            if (provider != com.example.myapplication1.AccelerationConfig.CPU) {
+                Log.w(TAG, "Streaming ASR init with provider=$provider failed, falling back to CPU")
+            }
+        }
+        modelReady = false
+        return false
+    }
+
+    private fun tryInitModel(model: StreamingModel, provider: String): Boolean {
         val dir = File(context.filesDir, model.dirName)
         return try {
             fun p(f: String) = File(dir, f).absolutePath
@@ -252,21 +276,21 @@ class SherpaStreamingAsr(private val context: Context) {
                     transducer = OnlineTransducerModelConfig(
                         encoder = p(model.encoderFile), decoder = p(model.decoderFile), joiner = p(model.joinerFile),
                     ),
-                    tokens = p(model.tokensFile), numThreads = 2, debug = false, provider = "cpu",
+                    tokens = p(model.tokensFile), numThreads = 2, debug = false, provider = provider,
                 )
                 ModelType.PARAFORMER -> OnlineModelConfig(
                     paraformer = OnlineParaformerModelConfig(
                         encoder = p(model.encoderFile), decoder = p(model.decoderFile),
                     ),
-                    tokens = p(model.tokensFile), numThreads = 2, debug = false, provider = "cpu",
+                    tokens = p(model.tokensFile), numThreads = 2, debug = false, provider = provider,
                 )
                 ModelType.ZIPFORMER2_CTC -> OnlineModelConfig(
                     zipformer2Ctc = OnlineZipformer2CtcModelConfig(model = p(model.modelFile)),
-                    tokens = p(model.tokensFile), numThreads = 2, debug = false, provider = "cpu",
+                    tokens = p(model.tokensFile), numThreads = 2, debug = false, provider = provider,
                 )
                 ModelType.NEMO_CTC -> OnlineModelConfig(
                     neMoCtc = OnlineNeMoCtcModelConfig(model = p(model.modelFile)),
-                    tokens = p(model.tokensFile), numThreads = 2, debug = false, provider = "cpu",
+                    tokens = p(model.tokensFile), numThreads = 2, debug = false, provider = provider,
                 )
             }
 
@@ -286,11 +310,13 @@ class SherpaStreamingAsr(private val context: Context) {
             stream = recognizer!!.createStream("")
             modelReady = true
             currentModel = model
-            Log.i(TAG, "Streaming ASR [${model.label}] initialized")
             true
         } catch (e: Throwable) {
-            Log.e(TAG, "Init failed: ${e.message}", e)
-            modelReady = false
+            Log.e(TAG, "Init with provider=$provider failed: ${e.message}", e)
+            try { stream?.release() } catch (_: Throwable) {}
+            try { recognizer?.release() } catch (_: Throwable) {}
+            stream = null
+            recognizer = null
             false
         }
     }
@@ -333,13 +359,39 @@ class SherpaStreamingAsr(private val context: Context) {
             val localRecognizer = recognizer ?: return@launch
             val localStream = stream ?: return@launch
 
+            // Iter-4: language detection state (accumulate first ~3s after each endpoint)
+            val lidBuffer = mutableListOf<FloatArray>()
+            var lidSampleCount = 0
+            var lidDetected = false
+
             try {
                 while (isActive && recording) {
                     val n = try { audioRecord?.read(buf, 0, buf.size) ?: break } catch (_: Throwable) { break }
                     if (n <= 0) continue
 
                     val floats = FloatArray(n) { buf[it] / 32768.0f }
-                    localStream.acceptWaveform(floats, SAMPLE_RATE)
+
+                    // Iter-3: denoise before ASR
+                    val samples = if (denoiserEnabled && speechEnhancer?.isReady() == true) {
+                        speechEnhancer!!.denoise(floats, SAMPLE_RATE)
+                    } else floats
+
+                    localStream.acceptWaveform(samples, SAMPLE_RATE)
+
+                    // Iter-4: accumulate audio for language detection
+                    if (languageDetectionEnabled && languageDetector?.isReady() == true && !lidDetected) {
+                        lidBuffer.add(samples.copyOf())
+                        lidSampleCount += samples.size
+                        if (lidSampleCount >= LanguageDetector.DETECTION_SAMPLES) {
+                            lidDetected = true
+                            val allSamples = FloatArray(lidSampleCount)
+                            var off = 0
+                            for (chunk in lidBuffer) { chunk.copyInto(allSamples, off); off += chunk.size }
+                            lidBuffer.clear()
+                            val lang = languageDetector!!.detect(allSamples, SAMPLE_RATE)
+                            withContext(Dispatchers.Main) { callback.onLanguageDetected(lang) }
+                        }
+                    }
 
                     // Decode all ready frames
                     while (localRecognizer.isReady(localStream)) {
@@ -358,8 +410,9 @@ class SherpaStreamingAsr(private val context: Context) {
                         if (finalText.isNotBlank()) {
                             withContext(Dispatchers.Main) { callback.onResult(finalText) }
                         }
-                        // Reset for next utterance
+                        // Reset for next utterance + reset LID for next segment
                         localRecognizer.reset(localStream)
+                        lidBuffer.clear(); lidSampleCount = 0; lidDetected = false
                     }
                 }
             } finally {

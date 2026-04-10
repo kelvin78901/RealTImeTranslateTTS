@@ -52,7 +52,7 @@ class EdgeTts(private val cacheDir: File) : AutoCloseable {
         // Windows epoch offset from Unix epoch (seconds)
         private const val WIN_EPOCH = 11644473600L
 
-        /** Available high-quality Chinese voices */
+        /** Available high-quality voices per language */
         val ZH_VOICES = listOf(
             "zh-CN-XiaoxiaoNeural" to "晓晓 (女·温暖自然)",
             "zh-CN-YunxiNeural" to "云希 (男·沉稳)",
@@ -61,6 +61,45 @@ class EdgeTts(private val cacheDir: File) : AutoCloseable {
             "zh-CN-XiaochenNeural" to "晓辰 (女·轻松)",
             "zh-CN-YunyangNeural" to "云扬 (男·新闻)",
         )
+        val EN_VOICES = listOf(
+            "en-US-JennyNeural" to "Jenny (Female·US)",
+            "en-US-GuyNeural" to "Guy (Male·US)",
+            "en-US-AriaNeural" to "Aria (Female·US)",
+            "en-US-DavisNeural" to "Davis (Male·US)",
+            "en-GB-SoniaNeural" to "Sonia (Female·UK)",
+            "en-GB-RyanNeural" to "Ryan (Male·UK)",
+        )
+        val JA_VOICES = listOf(
+            "ja-JP-NanamiNeural" to "Nanami (女性)",
+            "ja-JP-KeitaNeural" to "Keita (男性)",
+        )
+        val KO_VOICES = listOf(
+            "ko-KR-SunHiNeural" to "SunHi (여성)",
+            "ko-KR-InJoonNeural" to "InJoon (남성)",
+        )
+        val FR_VOICES = listOf(
+            "fr-FR-DeniseNeural" to "Denise (Femme)",
+            "fr-FR-HenriNeural" to "Henri (Homme)",
+        )
+        val DE_VOICES = listOf(
+            "de-DE-KatjaNeural" to "Katja (Weiblich)",
+            "de-DE-ConradNeural" to "Conrad (Männlich)",
+        )
+        val ES_VOICES = listOf(
+            "es-ES-ElviraNeural" to "Elvira (Mujer)",
+            "es-ES-AlvaroNeural" to "Alvaro (Hombre)",
+        )
+        val RU_VOICES = listOf(
+            "ru-RU-SvetlanaNeural" to "Svetlana (Жен.)",
+            "ru-RU-DmitryNeural" to "Dmitry (Муж.)",
+        )
+
+        /** Get voices for a given language code. */
+        fun voicesForLang(lang: String): List<Pair<String, String>> = when (lang) {
+            "zh" -> ZH_VOICES; "en" -> EN_VOICES; "ja" -> JA_VOICES; "ko" -> KO_VOICES
+            "fr" -> FR_VOICES; "de" -> DE_VOICES; "es" -> ES_VOICES; "ru" -> RU_VOICES
+            else -> EN_VOICES
+        }
 
         // ---- DRM: Sec-MS-GEC token generation ----
 

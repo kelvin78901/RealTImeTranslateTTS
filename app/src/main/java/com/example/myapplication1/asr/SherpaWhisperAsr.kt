@@ -240,9 +240,21 @@ class SherpaWhisperAsr(private val context: Context) {
         }
         if (modelReady && currentModel == model) return true
 
-        val dir = File(context.filesDir, model.dirName)
+        for (provider in com.example.myapplication1.AccelerationConfig.providerChain(context)) {
+            if (tryInitModel(model, provider)) {
+                Log.i(TAG, "Whisper [${model.label}] + VAD 初始化成功 (provider=$provider)")
+                return true
+            }
+            if (provider != com.example.myapplication1.AccelerationConfig.CPU) {
+                Log.w(TAG, "Whisper init with provider=$provider failed, falling back to CPU")
+            }
+        }
+        return false
+    }
 
-        try {
+    private fun tryInitModel(model: WhisperModel, provider: String): Boolean {
+        val dir = File(context.filesDir, model.dirName)
+        return try {
             val whisperConfig = OfflineWhisperModelConfig(
                 encoder = File(dir, model.encoderFile).absolutePath,
                 decoder = File(dir, model.decoderFile).absolutePath,
@@ -253,7 +265,7 @@ class SherpaWhisperAsr(private val context: Context) {
             mCfg.whisper = whisperConfig
             mCfg.tokens = File(dir, model.tokensFile).absolutePath
             mCfg.numThreads = 4
-            mCfg.provider = "cpu"
+            mCfg.provider = provider
 
             val rCfg = OfflineRecognizerConfig()
             rCfg.modelConfig = mCfg
@@ -273,16 +285,19 @@ class SherpaWhisperAsr(private val context: Context) {
             vCfg.sileroVadModelConfig = silero
             vCfg.sampleRate = SAMPLE_RATE
             vCfg.numThreads = 1
-            vCfg.provider = "cpu"
+            vCfg.provider = provider
             vad = Vad(null, vCfg)
 
             modelReady = true
             currentModel = model
-            Log.i(TAG, "Whisper [${model.label}] + VAD 初始化成功")
-            return true
+            true
         } catch (e: Throwable) {
-            Log.e(TAG, "模型初始化失败: ${e.message}", e)
-            return false
+            Log.e(TAG, "模型初始化失败 (provider=$provider): ${e.message}", e)
+            try { recognizer?.release() } catch (_: Throwable) {}
+            try { vad?.release() } catch (_: Throwable) {}
+            recognizer = null
+            vad = null
+            false
         }
     }
 
